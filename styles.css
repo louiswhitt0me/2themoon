@@ -426,7 +426,10 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
   height: calc(var(--tabbar-h) + env(safe-area-inset-bottom)); padding-bottom: env(safe-area-inset-bottom);
   background: rgba(5,8,24,.88); border-top: 1px solid var(--line);
   backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
-  display: grid; grid-template-columns: repeat(3, 1fr);
+  /* One equal column per VISIBLE tab: a hidden tab is display:none and so is
+     not a grid item, which keeps the debug tab from wrapping onto a second row
+     when it is switched on. */
+  display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
 }
 .tab {
   background: none; border: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
@@ -602,4 +605,138 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+
+/* =========================================================================
+   Debug screen (debug.js) — the scope, the tuning panel and the serial
+   monitor. Dense and monospaced on purpose: it is a tool, not a product
+   screen, and it is hidden unless the debug tools are switched on.
+   ========================================================================= */
+.dbg-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 12px;
+  margin-bottom: 14px;
+}
+.dbg-h {
+  margin: 18px 0 8px;
+  font: 800 15px/1 var(--display);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--moon);
+}
+.dbg-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.dbg-row .btn-small { flex: 1 1 auto; min-width: 74px; }
+.dbg-card .dim { color: var(--text-2); font-size: 12.5px; line-height: 1.4; margin: 10px 0 0; }
+.dbg-card code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--card-2); border-radius: 4px; padding: 1px 4px; font-size: 12px;
+}
+.btn-small[aria-pressed="true"] { background: var(--moon); color: var(--on-light); }
+
+/* ---- Scope ---- */
+#scope {
+  display: block;
+  width: 100%;
+  height: 260px;
+  border-radius: var(--radius-sm);
+  background: var(--card-solid);
+  touch-action: none;          /* we do our own pan and pinch */
+  cursor: crosshair;
+}
+.scope-read, .scope-status {
+  margin: 8px 0 0;
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+  min-height: 1.35em;
+}
+.scope-status { color: var(--text-2); }
+.scope-read .dim, .scope-status .dim { color: var(--text-2); }
+.scope-status .bad { color: var(--danger); }
+.dbg-legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 0; font-size: 11.5px; color: var(--text-2); }
+.key { display: inline-flex; align-items: center; gap: 5px; }
+.key::before { content: ""; width: 14px; height: 3px; border-radius: 2px; background: currentColor; }
+.key-v { color: var(--moon); }
+.key-x { color: #FF6BD6; }
+.key-y { color: #7CF5C8; }
+.key-z { color: #B79BFF; }
+.key-flight::before, .key-contact::before { height: 10px; border-radius: 3px; }
+.key-flight { color: var(--air); }
+.key-contact { color: var(--bed); }
+
+/* ---- Tuning ---- */
+.dbg-params { display: flex; flex-direction: column; gap: 6px; }
+.prow {
+  display: grid;
+  grid-template-columns: 1fr 88px auto;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: var(--radius-sm);
+}
+/* A value that is no longer the firmware default: the thing you most need to
+   see when a recording comes out strange. */
+.prow.changed { background: rgba(255, 225, 122, .10); box-shadow: inset 2px 0 0 var(--moon); }
+.prow label {
+  font: 13px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.prow input {
+  width: 100%; min-height: 36px; padding: 0 8px;
+  background: var(--card-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px;
+  font: 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: right;
+}
+.prow input:focus-visible { outline: 2px solid var(--moon); outline-offset: 1px; }
+.pmeta { font-size: 10.5px; line-height: 1.25; color: var(--text-2); text-align: right; white-space: nowrap; }
+
+/* ---- Serial monitor ---- */
+.dbg-log {
+  height: 240px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: var(--card-solid);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre;
+}
+.ln { color: var(--text-2); }
+.ln.out { color: var(--moon); }
+/* Colour by line type, so a wall of text still reads at a glance. */
+.ln.t-J { color: var(--air); }
+.ln.t-S { color: var(--text); }
+.ln.t-X { color: var(--warn); }
+.ln.t-E { color: var(--danger); }
+.ln.t-T { color: var(--moon-deep); }
+.ln.t-C, .ln.t-DH, .ln.t-DE { color: #B79BFF; }
+.ln.t-DG { color: var(--danger); }
+.dbg-cmd { display: flex; gap: 8px; margin-top: 10px; }
+.dbg-cmd input {
+  flex: 1; min-height: 44px; padding: 0 10px;
+  background: var(--card-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 10px;
+  font: 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.dbg-cmd input:focus-visible { outline: 2px solid var(--moon); outline-offset: 1px; }
+.dbg-cmd .btn-primary { min-height: 44px; padding: 0 16px; }
+
+/* ---- Saved captures ---- */
+.dbg-captures { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.crow {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 7px 8px; background: var(--card-2); border-radius: var(--radius-sm);
+  font-size: 12.5px; color: var(--text);
+}
+.crow-btns { display: flex; gap: 6px; flex: 0 0 auto; }
+.crow-btns .btn-small { min-height: 32px; padding: 0 10px; font-size: 13px; }
+
+@media (max-width: 380px) {
+  .prow { grid-template-columns: 1fr 74px; }
+  .pmeta { grid-column: 1 / -1; text-align: left; }
 }

@@ -12,6 +12,10 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="stylesheet" href="styles.css">
   <script src="app.js" defer></script>
+  <!-- Debug tools: the scope, the serial monitor and the tuning panel. Loaded
+       after app.js (defer keeps the order) and optional — app.js guards every
+       call into it, so a failure here never stops jumps being recorded. -->
+  <script src="debug.js" defer></script>
 </head>
 <body>
   <div class="sky" aria-hidden="true"><div class="twinkle"></div><div class="moon"></div><div class="horizon"></div></div>
@@ -74,6 +78,89 @@
     <section id="view-history" class="view" hidden aria-labelledby="history-title">
       <div id="history-content"></div>
     </section>
+
+    <!-- ============ DEBUG ============
+         Hidden unless the debug tools are switched on (?debug=1, or five taps
+         on the wordmark). Everything here is driven by debug.js. -->
+    <section id="view-debug" class="view" hidden aria-labelledby="debug-title">
+      <div class="turn-head">
+        <div class="turn-head-text">
+          <p class="kicker">Sensor tools</p>
+          <h1 id="debug-title" class="turn-title">Signal &amp; tuning</h1>
+        </div>
+        <div class="turn-head-actions">
+          <button type="button" class="btn-small" data-dbg="off">Hide</button>
+        </div>
+      </div>
+
+      <!-- ---- The scope: what the sensor measured, with what the detector
+                decided about it drawn on top. ---- -->
+      <div class="dbg-card">
+        <canvas id="scope" height="260" aria-label="Raw acceleration plot"></canvas>
+        <p id="scope-read" class="scope-read"><span class="dim">Drag to pan, pinch or scroll to zoom, hover for a reading.</span></p>
+        <p id="scope-status" class="scope-status"></p>
+        <div class="dbg-row">
+          <button type="button" class="btn-small" data-dbg="zoom-out">&minus;</button>
+          <button type="button" class="btn-small" data-dbg="zoom-in">+</button>
+          <button type="button" class="btn-small" data-dbg="follow">Follow live</button>
+          <button type="button" class="btn-small" data-dbg="fit">Fit</button>
+          <button type="button" class="btn-small" data-dbg="axes" aria-pressed="false">x/y/z</button>
+        </div>
+        <p class="dbg-legend">
+          <span class="key key-v">v (what the detector uses)</span>
+          <span class="key key-x">x</span><span class="key key-y">y</span><span class="key key-z">z</span>
+          <span class="key key-flight">flight</span><span class="key key-contact">contact</span>
+        </p>
+      </div>
+
+      <!-- ---- Recording. The sensor keeps the last 5 s in RAM and sends it in
+                packed blocks; 400 Hz of text would not fit over Bluetooth. ---- -->
+      <h2 class="dbg-h">Recording</h2>
+      <div class="dbg-card">
+        <div class="dbg-row">
+          <button type="button" class="btn-small" data-dbg="trigger">Trigger on jumps</button>
+          <button type="button" class="btn-small" data-dbg="stream">Stream</button>
+          <button type="button" class="btn-small" data-dbg="once">Last 5 s</button>
+          <button type="button" class="btn-small" data-dbg="stop">Stop</button>
+        </div>
+        <div class="dbg-row">
+          <button type="button" class="btn-small" data-dbg="save">Save capture</button>
+          <button type="button" class="btn-small" data-dbg="clear">Clear plot</button>
+        </div>
+        <p class="dim">A saved capture keeps the settings it was recorded under, and exports as CSV for offline replay.</p>
+        <div id="dbg-captures" class="dbg-captures"></div>
+      </div>
+
+      <!-- ---- Tuning. Changes apply at once and are lost on a power cycle
+                unless saved, which is the safe way round. ---- -->
+      <h2 class="dbg-h">Tuning</h2>
+      <div class="dbg-card">
+        <div id="dbg-params" class="dbg-params"></div>
+        <div class="dbg-row">
+          <button type="button" class="btn-small" data-dbg="reload">Reload</button>
+          <button type="button" class="btn-small" data-dbg="save-nvs">Save to sensor</button>
+          <button type="button" class="btn-small btn-outline" data-dbg="reset">Defaults</button>
+        </div>
+        <p class="dim">Changes take effect immediately but are <strong>not</strong> kept through a power cycle until you save them &mdash; so switching the sensor off and on always gets you back to a known state.</p>
+      </div>
+
+      <!-- ---- The serial monitor. ---- -->
+      <h2 class="dbg-h">Sensor output</h2>
+      <div class="dbg-card">
+        <div id="dbg-log" class="dbg-log" aria-live="off"></div>
+        <form id="dbg-cmd-form" class="dbg-cmd" autocomplete="off">
+          <label class="sr-only" for="dbg-cmd">Command</label>
+          <input id="dbg-cmd" type="text" placeholder="Command, e.g. t land_t 2.5" enterkeyhint="send" spellcheck="false">
+          <button type="submit" class="btn-primary">Send</button>
+        </form>
+        <div class="dbg-row">
+          <button type="button" class="btn-small" data-dbg="pause">Pause</button>
+          <button type="button" class="btn-small" data-dbg="clear-log">Clear</button>
+          <button type="button" class="btn-small" data-dbg="blocks" aria-pressed="false">Show D blocks</button>
+        </div>
+        <p class="dim">Commands: <code>d</code> stream &middot; <code>d t</code> trigger &middot; <code>d 0</code> stop &middot; <code>t</code> list settings &middot; <code>t NAME VALUE</code> set one &middot; <code>b N</code> backfill &middot; <code>?</code> help</p>
+      </div>
+    </section>
   </main>
 
   <nav class="tabbar" aria-label="Screens">
@@ -88,6 +175,11 @@
     <button type="button" class="tab" data-tab="history">
       <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M12 7v5l3 2" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
       <span>History</span>
+    </button>
+    <!-- Shown only when the debug tools are switched on; debug.js unhides it. -->
+    <button type="button" class="tab" data-tab="debug" hidden>
+      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 15l4-6 4 5 3-9 3 7 4-3" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>Debug</span>
     </button>
   </nav>
 
@@ -215,7 +307,7 @@
         sessionStorage.setItem('2themoon-cache-bust', '1');
       } catch (e) { /* private mode: reload once anyway */ }
       console.warn('[boot] app did not start — refetching past the cache');
-      var files = ['index.html', 'app.js', 'styles.css'];
+      var files = ['index.html', 'app.js', 'debug.js', 'styles.css'];
       Promise.all(files.map(function (f) {
         return fetch(f, { cache: 'reload' }).catch(function () {});
       })).then(function () { location.reload(); });

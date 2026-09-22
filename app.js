@@ -54,9 +54,24 @@ const CONFIG = {
     4: 'Data gap just before this jump',
   },
 
+  // --- Debug screen (debug.js) ----------------------------------------------
+  // Hidden until it is switched on with ?debug=1 or five taps on the wordmark,
+  // so a club never trips over it. Once on it stays on for this browser.
+  debugTypes: {
+    capture: 'D',       // D,startIdx,<base64 int16 milli-g triples>
+    dumpHeader: 'DH',   // DH,fromBlock,periodUs,g0x,g0y,g0z,mode
+    dumpGap: 'DG',      // DG,fromBlock,toBlock
+    dumpEnd: 'DE',      // DE,blocks
+    jumpMarks: 'DJ',    // DJ,index,onsetIdx,takeoffIdx,landIdx
+    param: 'T',         // T,name,value,lo,hi,default
+    reject: 'X',        // X,sampleIdx,reason
+    error: 'E',         // E,sampleIdx,reason
+    calib: 'C',         // C,effectivePeriodUs,g0x,g0y,g0z
+  },
+
   // --- Storage --------------------------------------------------------------
   dbName: 'trampoline-sensor-v1',
-  dbVersion: 2,
+  dbVersion: 3,
 };
 
 /* ==========================================================================
@@ -87,9 +102,13 @@ function parsePacket(line) {
     return { kind: 'jump', type, index, flightMs, contactMs, peakG, timestamp, flags };
   }
 
+  // A state change. The turn/set logic only cares that the trampoline went
+  // quiet; the debug screen also wants where and between which states, so both
+  // answers carry the indices.
   if (type === CONFIG.idleType) {
     if (f.length < 4) return null;
-    return f[3] === CONFIG.idleState ? { kind: 'idle', type } : { kind: 'ignore', type };
+    const extra = { type, idx: Number(f[1]), from: f[2], to: f[3] };
+    return f[3] === CONFIG.idleState ? { kind: 'idle', ...extra } : { kind: 'ignore', ...extra };
   }
 
   if (type === CONFIG.deviceNameType) {
@@ -97,7 +116,40 @@ function parsePacket(line) {
     return name ? { kind: 'name', type, name } : null;
   }
 
-  if (/^[A-Z]$/.test(type)) return { kind: 'ignore', type };   // other firmware line types
+  // --- Debug / tuning lines. None of these touch the recording pipeline:
+  //     ingestLine() hands them to the debug screen and moves on. ---
+  const D = CONFIG.debugTypes;
+  const num = (s) => (s === '' || s == null ? NaN : Number(s));
+
+  if (type === D.capture) {
+    const startIdx = num(f[1]);
+    if (!Number.isFinite(startIdx) || !f[2]) return null;
+    return { kind: 'capture', type, startIdx, b64: f[2] };
+  }
+  if (type === D.dumpHeader) {
+    if (f.length < 7) return null;
+    return { kind: 'dumpHeader', type, fromBlock: num(f[1]), periodUs: num(f[2]),
+             g0: [num(f[3]), num(f[4]), num(f[5])], mode: f[6] };
+  }
+  if (type === D.dumpGap) return { kind: 'dumpGap', type, fromBlock: num(f[1]), toBlock: num(f[2]) };
+  if (type === D.dumpEnd) return { kind: 'dumpEnd', type, blocks: num(f[1]) };
+  if (type === D.jumpMarks) {
+    if (f.length < 5) return null;
+    return { kind: 'jumpMarks', type, index: num(f[1]), onset: num(f[2]), takeoff: num(f[3]), land: num(f[4]) };
+  }
+  if (type === D.param) {
+    if (f.length < 6 || !f[1]) return null;
+    const value = num(f[2]);
+    if (!Number.isFinite(value)) return null;
+    return { kind: 'param', type, name: f[1], value, lo: num(f[3]), hi: num(f[4]), def: num(f[5]) };
+  }
+  if (type === D.calib) {
+    return { kind: 'calib', type, periodUs: num(f[1]), g0: [num(f[2]), num(f[3]), num(f[4])] };
+  }
+  if (type === D.reject) return { kind: 'reject', type, idx: num(f[1]), reason: f[2] || '' };
+  if (type === D.error) return { kind: 'error', type, idx: num(f[1]), reason: f[2] || '' };
+
+  if (/^[A-Z]{1,2}$/.test(type)) return { kind: 'ignore', type };   // other firmware line types
   return null;
 }
 
@@ -248,6 +300,13 @@ const DB = {
           db.createObjectStore('meta');
         } else if (e.oldVersion < 2) {
           migrateV1ToV2(db, tx);
+        }
+        // v3 adds raw captures for the debug screen. Separate from the jump
+        // stores, so clearing sessions never touches a recording you are
+        // tuning against, and vice versa.
+        if (e.oldVersion < 3 && !db.objectStoreNames.contains('captures')) {
+          db.createObjectStore('captures', { keyPath: 'id', autoIncrement: true })
+            .createIndex('startedAt', 'startedAt');
         }
       };
       req.onsuccess = () => { this.db = req.result; resolve(); };
@@ -668,6 +727,9 @@ function feedText(text) {
 function ingestLine(line) {
   let p = null;
   try { p = parsePacket(line); } catch (e) { p = null; }
+  // The debug screen is a serial monitor: it sees every line, parsed or not,
+  // before anything decides to drop it. Guarded because debug.js is optional.
+  if (typeof Debug !== 'undefined') { try { Debug.line(line, p); } catch (e) { console.warn('[debug]', e); } }
   if (!p) { console.warn('[sensor] ignored packet that failed to parse:', JSON.stringify(line)); return; }
   if (p.kind === 'jump') enqueue(() => handleJump(p));
   else if (p.kind === 'idle') enqueue(() => handleIdle());
@@ -1405,12 +1467,13 @@ async function renderHistory() {
 function showView(view, { sessionId = null } = {}) {
   S.view = view;
   if (view === 'session') S.viewSessionId = sessionId;
-  for (const v of ['live', 'session', 'history']) $(`#view-${v}`).hidden = v !== view;
+  for (const v of ['live', 'session', 'history', 'debug']) $(`#view-${v}`).hidden = v !== view;
   $$('.tab').forEach((t) => (t.dataset.tab === view ? t.setAttribute('aria-current', 'page') : t.removeAttribute('aria-current')));
   $('main').scrollTop = 0;
   if (view === 'live') renderLive({});
   if (view === 'session') renderSession();
   if (view === 'history') renderHistory();
+  if (view === 'debug' && typeof Debug !== 'undefined') { Debug.render(); Debug.renderCaptures(); }
 }
 
 /* ---------- Turn / set detail overlay ---------- */
@@ -1715,6 +1778,12 @@ function wireEvents() {
 
   $$('.tab').forEach((t) => t.addEventListener('click', () => showView(t.dataset.tab)));
 
+  // Five taps on the wordmark shows or hides the debug tools, for a phone at a
+  // trampoline where typing ?debug=1 into the address bar is no fun.
+  $$('.topbar [data-wordmark]').forEach((el) => el.addEventListener('click', () => {
+    if (typeof Debug !== 'undefined') Debug.secretTap();
+  }));
+
   // Name sheet
   $('#name-sheet-chips').addEventListener('click', (e) => { const c = e.target.closest('.chip'); if (c) answerNameSheet(c.dataset.name); });
   $('#name-sheet-form').addEventListener('submit', (e) => { e.preventDefault(); const v = $('#name-sheet-input').value.trim(); if (v) answerNameSheet(v); else $('#name-sheet-input').focus(); });
@@ -1898,6 +1967,8 @@ async function boot() {
   window.__booted = true;
 
   // Reload-safe demo: carry on simulating into the same demo session.
+  if (typeof Debug !== 'undefined') Debug.init();
+
   if (await DB.meta('demoActive')) await startDemo({ resume: true });
 
   // If the browser remembers a permitted sensor (Chrome with persistent
