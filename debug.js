@@ -98,6 +98,7 @@ const Debug = {
   g0: null,
   periodUs: null,
   dumpMode: null,
+  armed: false,    // trigger mode is on: the sensor sends a window when a jump happens
   blocksIn: 0,
 
   // the detector's own account, drawn over the signal
@@ -231,6 +232,12 @@ const Debug = {
     this.renderStatus();
   },
 
+  setArmed(on) {
+    this.armed = on;
+    this.paint();
+    this.renderStatus();
+  },
+
   clearSignal() {
     this.d = { idx: [], ax: [], ay: [], az: [], v: [] };
     this.events = []; this.states = []; this.marks = []; this.gaps = [];
@@ -244,13 +251,15 @@ const Debug = {
   async send(cmd) {
     const line = String(cmd).trim();
     if (!line) return;
-    if (typeof BLE === 'undefined' || !BLE.rx) { toast('Connect the sensor first'); return; }
+    if (typeof BLE === 'undefined' || !BLE.rx) { toast('Connect the sensor first'); return false; }
     try {
       await BLE.rx.writeValue(new TextEncoder().encode(line + '\n'));
       this.push(line, 'out');
+      return true;
     } catch (e) {
       this.push(`! ${e.message}`, 'out');
       toast("Couldn't send that to the sensor");
+      return false;
     }
   },
 
@@ -310,7 +319,11 @@ const Debug = {
       ctx.fillStyle = tok('--text-2', '#AEB8E0');
       ctx.font = `${13 * dpr}px ${tok('--body', 'system-ui')}`;
       ctx.textAlign = 'center';
-      ctx.fillText('No signal yet — tap Stream or Trigger below', W / 2, H / 2);
+      // Nothing is drawn until the sensor sends a recording, so say which of
+      // the two it is: waiting for a jump, or never asked for anything.
+      ctx.fillText(this.armed
+        ? 'Waiting for a jump — the plot fills in when one lands'
+        : 'No signal yet — tap Stream, Trigger on jumps or Last 5 s below', W / 2, H / 2);
       return;
     }
 
@@ -554,7 +567,7 @@ const Debug = {
     if (!el || !this.enabled) return;
     const n = this.d.idx.length;
     const secs = this.periodUs ? ((this.view.span * this.periodUs) / 1e6).toFixed(2) : '?';
-    const mode = this.dumpMode ? `<b>${esc(this.dumpMode)}</b>` : 'idle';
+    const mode = this.dumpMode ? `<b>${esc(this.dumpMode)}</b>` : this.armed ? 'waiting for a jump' : 'idle';
     el.innerHTML =
       `${mode} · ${n} samples · window ${secs} s · ` +
       `${this.view.follow ? 'following' : 'held'}${this.gaps.length ? ` · <span class="bad">${this.gaps.length} gap${this.gaps.length === 1 ? '' : 's'}</span>` : ''}`;
@@ -695,10 +708,12 @@ const Debug = {
       const btn = e.target.closest('[data-dbg]');
       if (!btn) return;
       switch (btn.dataset.dbg) {
-        case 'stream':   this.send('d'); break;
-        case 'trigger':  this.send('d t'); break;
-        case 'once':     this.send('d !'); break;
-        case 'stop':     this.send('d 0'); break;
+        // Only trigger mode stays on after its window is sent; the firmware
+        // drops it for any other d command.
+        case 'stream':   if (await this.send('d')) this.setArmed(false); break;
+        case 'trigger':  if (await this.send('d t')) this.setArmed(true); break;
+        case 'once':     if (await this.send('d !')) this.setArmed(false); break;
+        case 'stop':     if (await this.send('d 0')) { this.dumpMode = null; this.setArmed(false); } break;
         case 'reload':   this.send('t'); break;
         case 'save-nvs': this.send('t save'); break;
         case 'reset':
