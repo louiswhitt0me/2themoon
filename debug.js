@@ -99,6 +99,9 @@ const Debug = {
   periodUs: null,
   dumpMode: null,
   armed: false,    // trigger mode is on: the sensor sends a window when a jump happens
+  // A saved capture on the scope instead of the live signal: {id, startedAt,
+  // params, live: {g0, periodUs}}. Live samples are dropped until Back to live.
+  viewing: null,
   blocksIn: 0,
 
   // the detector's own account, drawn over the signal
@@ -168,6 +171,7 @@ const Debug = {
     else if (this.showBlocks) this.push(raw, 'in');
 
     if (!p) return;
+    if (this.viewing) { this.lineWhileViewing(p); return; }
     switch (p.kind) {
       case 'capture':     this.addBlock(p); break;
       case 'dumpHeader':  this.onHeader(p); break;
@@ -184,6 +188,21 @@ const Debug = {
       this.keep(this.states, { idx: p.idx, to: p.to }, DBG.maxEvents);
       this.addEvent(p.idx, 'state', `${p.from}→${p.to}`);
     }
+  },
+
+  // A saved capture is on the plot, so leave it alone. The sensor's own state
+  // still has to be tracked — tuning, calibration and dump mode — so that Back
+  // to live picks up where the sensor actually is.
+  lineWhileViewing(p) {
+    const live = this.viewing.live;
+    switch (p.kind) {
+      case 'param':      this.params.set(p.name, { value: p.value, lo: p.lo, hi: p.hi, def: p.def }); this.renderParams(); break;
+      case 'calib':      live.g0 = p.g0; live.periodUs = p.periodUs; break;
+      case 'dumpHeader': live.g0 = p.g0; live.periodUs = p.periodUs; this.dumpMode = p.mode; break;
+      case 'dumpEnd':    this.dumpMode = null; break;
+      default: return;
+    }
+    this.renderStatus();
   },
 
   keep(arr, item, max) { arr.push(item); if (arr.length > max) arr.splice(0, arr.length - max); },
@@ -239,6 +258,7 @@ const Debug = {
   },
 
   clearSignal() {
+    if (this.viewing) { this.backToLive(); return; }
     this.d = { idx: [], ax: [], ay: [], az: [], v: [] };
     this.events = []; this.states = []; this.marks = []; this.gaps = [];
     this.blocksIn = 0;
@@ -378,14 +398,15 @@ const Debug = {
     ctx.textAlign = 'right';
     ctx.textBaseline = 'bottom';
     for (const [name, colour] of lines) {
-      const p = this.params.get(name);
-      if (!p) continue;
-      const y = Math.round(py(p.value)) + 0.5;
+      // A saved capture is drawn against the settings it was recorded under.
+      const value = this.viewing ? (this.viewing.params || {})[name] : (this.params.get(name) || {}).value;
+      if (!Number.isFinite(value)) continue;
+      const y = Math.round(py(value)) + 0.5;
       ctx.strokeStyle = colour;
       ctx.globalAlpha = 0.85;
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
       ctx.fillStyle = colour;
-      ctx.fillText(`${name} ${p.value}`, W - 4 * dpr, y - 2 * dpr);
+      ctx.fillText(`${name} ${value}`, W - 4 * dpr, y - 2 * dpr);
     }
     ctx.restore();
   },
@@ -567,7 +588,8 @@ const Debug = {
     if (!el || !this.enabled) return;
     const n = this.d.idx.length;
     const secs = this.periodUs ? ((this.view.span * this.periodUs) / 1e6).toFixed(2) : '?';
-    const mode = this.dumpMode ? `<b>${esc(this.dumpMode)}</b>` : this.armed ? 'waiting for a jump' : 'idle';
+    const mode = this.viewing ? '<b>saved capture</b>'
+      : this.dumpMode ? `<b>${esc(this.dumpMode)}</b>` : this.armed ? 'waiting for a jump' : 'idle';
     el.innerHTML =
       `${mode} · ${n} samples · window ${secs} s · ` +
       `${this.view.follow ? 'following' : 'held'}${this.gaps.length ? ` · <span class="bad">${this.gaps.length} gap${this.gaps.length === 1 ? '' : 's'}</span>` : ''}`;
@@ -615,6 +637,7 @@ const Debug = {
 
   /* ---------- saving a capture ---------- */
   async save() {
+    if (this.viewing) { toast('That capture is already saved'); return; }
     const n = this.d.idx.length;
     if (!n) { toast('Nothing recorded yet'); return; }
     const params = {};
@@ -657,6 +680,7 @@ const Debug = {
     el.innerHTML = all.slice(0, 20).map((c) =>
       `<div class="crow"><span>${esc(fmtTime(c.startedAt))} · ${c.n} samples</span>` +
       `<span class="crow-btns">` +
+      `<button type="button" class="btn-small" data-cap-plot="${c.id}">Plot</button>` +
       `<button type="button" class="btn-small" data-cap-csv="${c.id}">CSV</button>` +
       `<button type="button" class="btn-small" data-cap-del="${c.id}">Delete</button>` +
       `</span></div>`).join('');
@@ -681,6 +705,53 @@ const Debug = {
       rows.push(`${c.idx[i]},${c.ax[i].toFixed(4)},${c.ay[i].toFixed(4)},${c.az[i].toFixed(4)},${Number.isFinite(v) ? v.toFixed(4) : ''}`);
     }
     return rows.join('\r\n') + '\r\n';
+  },
+
+  /** Put a saved capture on the scope in place of the live signal. */
+  async openCapture(id) {
+    const c = await DB.get('captures', id);
+    if (!c || !c.n) { toast("Couldn't open that capture"); return; }
+    // Keep the live g0 and period from the first capture opened, not from one
+    // capture to the next, so Back to live restores the sensor's own values.
+    const live = this.viewing ? this.viewing.live : { g0: this.g0, periodUs: this.periodUs };
+    this.viewing = { id, startedAt: c.startedAt, params: c.params || {}, live };
+    this.g0 = c.g0;
+    this.periodUs = c.periodUs;
+    const d = { idx: Array.from(c.idx), ax: Array.from(c.ax), ay: Array.from(c.ay), az: Array.from(c.az), v: [] };
+    for (let i = 0; i < d.idx.length; i++) d.v.push(verticalG(d.ax[i], d.ay[i], d.az[i], c.g0));
+    this.d = d;
+    this.events = (c.events || []).slice();
+    this.states = (c.states || []).slice();
+    this.marks = (c.marks || []).slice();
+    this.gaps = (c.gaps || []).slice();
+    // Open on the whole recording, held still.
+    const first = d.idx[0], last = d.idx[d.idx.length - 1];
+    this.view.follow = false;
+    this.view.span = Math.max(DBG.minSpan, Math.min(DBG.maxSpan, last - first + 1));
+    this.view.start = first;
+    this.cursor = null;
+    this.renderViewing();
+    this.paint();
+    this.renderStatus();
+    if (this.canvas) this.canvas.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  },
+
+  backToLive() {
+    if (!this.viewing) return;
+    this.g0 = this.viewing.live.g0;
+    this.periodUs = this.viewing.live.periodUs;
+    this.viewing = null;
+    this.view.span = DBG.defaultSpan;   // the capture's zoom means nothing live
+    this.renderViewing();
+    this.clearSignal();
+  },
+
+  renderViewing() {
+    const el = document.getElementById('dbg-viewing');
+    if (!el) return;
+    el.hidden = !this.viewing;
+    const label = document.getElementById('dbg-viewing-label');
+    if (label && this.viewing) label.textContent = `Viewing capture from ${fmtTime(this.viewing.startedAt)}`;
   },
 
   async exportCapture(id) {
@@ -720,8 +791,16 @@ const Debug = {
       // own attributes rather than data-dbg, so handle them first.
       const csv = e.target.closest('[data-cap-csv]');
       if (csv) { this.exportCapture(Number(csv.dataset.capCsv)); return; }
+      const plot = e.target.closest('[data-cap-plot]');
+      if (plot) { this.openCapture(Number(plot.dataset.capPlot)); return; }
       const del = e.target.closest('[data-cap-del]');
-      if (del) { await DB.del('captures', Number(del.dataset.capDel)); this.renderCaptures(); return; }
+      if (del) {
+        const id = Number(del.dataset.capDel);
+        await DB.del('captures', id);
+        if (this.viewing && this.viewing.id === id) this.backToLive();
+        this.renderCaptures();
+        return;
+      }
 
       const btn = e.target.closest('[data-dbg]');
       if (!btn) return;
@@ -739,6 +818,7 @@ const Debug = {
               'Every threshold goes back to the value the firmware shipped with, and the saved settings are cleared.', 'Reset', false)) this.send('t reset');
           break;
         case 'clear':    this.clearSignal(); break;
+        case 'live':     this.backToLive(); break;
         case 'clear-log': this.log = []; this.renderLog(); break;
         case 'pause':    this.paused = !this.paused; btn.textContent = this.paused ? 'Resume' : 'Pause'; break;
         case 'blocks':   this.showBlocks = !this.showBlocks; btn.setAttribute('aria-pressed', String(this.showBlocks)); break;

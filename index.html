@@ -96,6 +96,11 @@
       <!-- ---- The scope: what the sensor measured, with what the detector
                 decided about it drawn on top. ---- -->
       <div class="dbg-card">
+        <!-- Shown while a saved capture is on the plot instead of the live signal. -->
+        <div id="dbg-viewing" class="dbg-viewing" hidden>
+          <span id="dbg-viewing-label">Viewing a saved capture</span>
+          <button type="button" class="btn-small" data-dbg="live">Back to live</button>
+        </div>
         <canvas id="scope" height="260" aria-label="Raw acceleration plot"></canvas>
         <p id="scope-read" class="scope-read"><span class="dim">Drag to pan, pinch or scroll to zoom, hover for a reading.</span></p>
         <p id="scope-status" class="scope-status"></p>
