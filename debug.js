@@ -63,6 +63,18 @@ function verticalG(ax, ay, az, g0) {
   return (ax * g0[0] + ay * g0[1] + az * g0[2]) / m2;
 }
 
+/** Time since boot for the cursor readout: "20m 08s 306ms", with hours
+    added once a session runs past 60 minutes. */
+function fmtClock(ms) {
+  const t = Math.max(0, Math.round(ms));
+  const h = Math.floor(t / 3600000);
+  const m = Math.floor(t / 60000) % 60;
+  const s = Math.floor(t / 1000) % 60;
+  const pad = (n, w) => String(n).padStart(w, '0');
+  const tail = `${pad(s, 2)}s ${pad(t % 1000, 3)}ms`;
+  return h ? `${h}h ${pad(m, 2)}m ${tail}` : `${m}m ${tail}`;
+}
+
 const lowerBound = (arr, n, x) => {
   let lo = 0, hi = n;
   while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < x) lo = m + 1; else hi = m; }
@@ -496,9 +508,9 @@ const Debug = {
     ctx.globalAlpha = 1;
     const read = document.getElementById('scope-read');
     if (read) {
-      const ms = this.periodUs ? ((d.idx[i] * this.periodUs) / 1000).toFixed(0) : '?';
+      const clock = this.periodUs ? fmtClock((d.idx[i] * this.periodUs) / 1000) : '?';
       read.innerHTML =
-        `<b>#${d.idx[i]}</b> <span class="dim">${ms} ms</span> · ` +
+        `<b>#${d.idx[i]}</b> <span class="dim">${clock}</span> · ` +
         `v <b>${d.v[i].toFixed(3)}</b> · x ${d.ax[i].toFixed(2)} y ${d.ay[i].toFixed(2)} z ${d.az[i].toFixed(2)}`;
     }
   },
