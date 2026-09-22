@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#050818">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="2themoon: live air time and bed time for every trampoline jump, from your moonlander1 sensor.">
+  <!-- The product name is set from CONFIG.brandName in app.js; this is only the pre-load fallback. -->
+  <title>2themoon</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="sky" aria-hidden="true"><div class="twinkle"></div><div class="moon"></div><div class="horizon"></div></div>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="topbar">
+    <span class="wordmark" data-wordmark></span>
+    <button type="button" id="conn-status" class="conn" data-state="idle" aria-live="polite" title="Connection">
+      <span class="conn-dot" aria-hidden="true"></span><span class="conn-label">Not connected</span>
+    </button>
+  </header>
+
+  <div id="demo-banner" class="demo-banner" hidden>
+    <span><strong>DEMO MODE</strong> · these jumps are simulated</span>
+    <button type="button" id="demo-stop" class="btn-small">Stop demo</button>
+  </div>
+
+  <div id="conn-banner" class="conn-banner" hidden role="alert">
+    <span class="conn-banner-msg"></span>
+    <button type="button" id="reconnect-btn" class="btn-small btn-light" hidden>Reconnect</button>
+  </div>
+
+  <main id="main">
+    <!-- ============ LIVE ============ -->
+    <section id="view-live" class="view" aria-labelledby="live-title">
+      <div id="unsupported" class="notice" hidden></div>
+
+      <div id="connect-panel" class="connect-panel">
+        <button type="button" id="connect-btn" class="btn-primary btn-huge">
+          <svg aria-hidden="true" viewBox="0 0 24 24" class="ico"><path d="M7 7l10 10-5 5V2l5 5L7 17" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span class="btn-label"><span class="btn-main">Connect sensor</span><span class="btn-sub" data-device>moonlander1</span></span>
+        </button>
+        <button type="button" id="demo-btn" class="btn-ghost">Try demo</button>
+      </div>
+
+      <div class="turn-head">
+        <div>
+          <p id="live-kicker" class="kicker"></p>
+          <h1 id="live-title" class="turn-title">Ready for liftoff</h1>
+        </div>
+        <div class="turn-head-actions">
+          <button type="button" id="end-turn-btn" class="btn-small btn-outline" hidden>End turn</button>
+        </div>
+      </div>
+
+      <div id="live-stats" class="stats"></div>
+      <div id="live-chart" class="chart-card"></div>
+    </section>
+
+    <!-- ============ SESSION ============ -->
+    <section id="view-session" class="view" hidden aria-labelledby="session-title">
+      <div id="session-content"></div>
+    </section>
+
+    <!-- ============ HISTORY ============ -->
+    <section id="view-history" class="view" hidden aria-labelledby="history-title">
+      <div id="history-content"></div>
+    </section>
+  </main>
+
+  <nav class="tabbar" aria-label="Screens">
+    <button type="button" class="tab" data-tab="live" aria-current="page">
+      <svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="11" width="4" height="10" rx="1"/><rect x="10" y="4" width="4" height="17" rx="1"/><rect x="17" y="8" width="4" height="13" rx="1"/></svg>
+      <span>Live</span>
+    </button>
+    <button type="button" class="tab" data-tab="session">
+      <svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="4" rx="1"/><rect x="3" y="10" width="18" height="4" rx="1"/><rect x="3" y="16" width="18" height="4" rx="1"/></svg>
+      <span>Session</span>
+    </button>
+    <button type="button" class="tab" data-tab="history">
+      <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M12 7v5l3 2" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+      <span>History</span>
+    </button>
+  </nav>
+
+  <!-- ============ "Who was jumping?" prompt (non-blocking bottom sheet) ============ -->
+  <section id="name-sheet" class="name-sheet" hidden aria-labelledby="name-sheet-title">
+    <div class="name-sheet-inner">
+      <div class="name-sheet-head">
+        <h2 id="name-sheet-title">Who was jumping?</h2>
+        <p id="name-sheet-sub" class="name-sheet-sub"></p>
+      </div>
+      <div id="name-sheet-chips" class="chips"></div>
+      <form id="name-sheet-form" class="name-form" autocomplete="off">
+        <label class="sr-only" for="name-sheet-input">New name</label>
+        <input id="name-sheet-input" type="text" maxlength="40" placeholder="Type a new name" enterkeyhint="done">
+        <button type="submit" class="btn-primary">Save</button>
+      </form>
+      <button type="button" id="name-sheet-skip" class="btn-link">Skip for now</button>
+    </div>
+  </section>
+
+  <!-- ============ Turn detail ============ -->
+  <section id="turn-overlay" class="overlay" hidden role="dialog" aria-modal="true" aria-labelledby="turn-overlay-title">
+    <div class="overlay-bar">
+      <button type="button" class="btn-back" data-close-turn>
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Back
+      </button>
+    </div>
+    <div class="overlay-body">
+      <div class="turn-head">
+        <div>
+          <p id="turn-overlay-kicker" class="kicker"></p>
+          <h2 id="turn-overlay-title" class="turn-title"></h2>
+        </div>
+      </div>
+      <div id="turn-overlay-stats" class="stats"></div>
+      <div id="turn-overlay-chart" class="chart-card"></div>
+      <div class="action-row">
+        <button type="button" id="turn-results-btn" class="btn-primary">Results card</button>
+        <button type="button" id="turn-rename-btn" class="btn-outline">Name / rename</button>
+        <button type="button" id="turn-csv-btn" class="btn-outline">Export CSV</button>
+        <button type="button" id="turn-delete-btn" class="btn-outline btn-danger">Delete turn</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Results card (for photos) ============ -->
+  <section id="results" class="results" hidden role="dialog" aria-modal="true" aria-label="Results card">
+    <div class="results-card">
+      <button type="button" id="results-close" class="results-close" aria-label="Close results">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+      </button>
+      <div class="rc-top">
+      <div class="rc-head">
+        <span class="wordmark wordmark-sm" data-wordmark></span>
+        <span id="rc-date" class="rc-date"></span>
+      </div>
+      <div class="rc-name-wrap">
+        <div id="rc-name" class="rc-name"></div>
+        <div id="rc-session" class="rc-session"></div>
+      </div>
+      </div>
+      <div class="rc-hero">
+        <span class="rc-hero-label">Time of flight</span>
+        <span id="rc-tof" class="rc-hero-num"></span>
+      </div>
+      <div id="rc-grid" class="rc-grid"></div>
+      <div id="rc-chart" class="rc-chart"></div>
+      <div class="rc-foot"><span>Measured by <span data-device>moonlander1</span></span><span>★ Shoot for the moon</span></div>
+    </div>
+  </section>
+
+  <!-- ============ Dialogs ============ -->
+  <dialog id="confirm-dlg" class="dlg" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-msg"></p>
+      <div class="dlg-actions">
+        <button value="cancel" class="btn-outline">Cancel</button>
+        <button value="ok" id="confirm-ok" class="btn-primary btn-danger-solid">Delete</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="rename-dlg" class="dlg" aria-labelledby="rename-title">
+    <form method="dialog" id="rename-form" autocomplete="off">
+      <h2 id="rename-title"></h2>
+      <div id="rename-chips" class="chips"></div>
+      <label class="sr-only" for="rename-input">Name</label>
+      <input id="rename-input" type="text" maxlength="60">
+      <div class="dlg-actions">
+        <button type="button" value="cancel" class="btn-outline" data-dlg-cancel>Cancel</button>
+        <button value="ok" class="btn-primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

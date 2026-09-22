@@ -1,0 +1,11 @@
+{
+  "name": "2themoon",
+  "short_name": "2themoon",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0A0F2C",
+  "theme_color": "#050818",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
