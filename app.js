@@ -26,11 +26,14 @@ const CONFIG = {
   // --- Chart ------------------------------------------------------------------
   barsVisible: 12,        // bars that fit across a portrait phone before it scrolls sideways
 
-  // --- Turn logic -----------------------------------------------------------
-  idleGraceMs: 0,         // wait this long after idle before closing the turn (0 = close at once).
+  // --- Turn / set logic -----------------------------------------------------
+  // A SET is one burst of continuous jumping, ended by the firmware's REST line.
+  // A TURN is one person's whole go: usually several sets with a rest between
+  // them. Only the "Next jumper" button ends a turn — nothing is split on time.
+  idleGraceMs: 0,         // wait this long after idle before closing the set (0 = close at once).
                           // A jump arriving during the grace period cancels it.
-  turnGapMs: 20000,       // safety net: if two jumps are this far apart by the sensor clock, the
-                          // idle message was missed (e.g. while disconnected), so start a new turn. 0 = off.
+  setGapMs: 20000,        // safety net: if two jumps are this far apart by the sensor clock, the
+                          // idle message was missed (e.g. while disconnected), so start a new set. 0 = off.
   newSessionAfterMs: 3 * 60 * 60 * 1000, // on connect, start a fresh training session if the current
                                          // one has had no activity for this long
 
@@ -48,7 +51,7 @@ const CONFIG = {
 
   // --- Storage --------------------------------------------------------------
   dbName: 'trampoline-sensor-v1',
-  dbVersion: 1,
+  dbVersion: 2,
 };
 
 /* ==========================================================================
@@ -142,7 +145,9 @@ function statsHTML(jumps) {
 }
 
 /* ==========================================================================
-   Storage (IndexedDB). Stores: sessions, turns, jumps, meta (key/value).
+   Storage (IndexedDB). Stores: sessions, turns, sets, jumps, meta (key/value).
+   A session holds turns (one person's go), a turn holds sets (one burst of
+   continuous jumping), and a set holds jumps.
    ========================================================================== */
 const DB = {
   db: null,
@@ -152,11 +157,18 @@ const DB = {
       req.onupgradeneeded = (e) => {
         const db = req.result;
         // Migrations: add a new `if (e.oldVersion < N)` block for each schema version.
-        if (e.oldVersion < 1) {
+        if (e.oldVersion < 2) {
+          // v1 kept one flat "turn" per burst of jumping. The model is now
+          // session -> turn -> set -> jump, so the old stores are dropped
+          // rather than migrated: nothing recorded under v1 is kept.
+          for (const name of Array.from(db.objectStoreNames)) db.deleteObjectStore(name);
           db.createObjectStore('sessions', { keyPath: 'id', autoIncrement: true }).createIndex('createdAt', 'createdAt');
           db.createObjectStore('turns', { keyPath: 'id', autoIncrement: true }).createIndex('sessionId', 'sessionId');
+          const st = db.createObjectStore('sets', { keyPath: 'id', autoIncrement: true });
+          st.createIndex('sessionId', 'sessionId');
+          st.createIndex('turnId', 'turnId');
           const j = db.createObjectStore('jumps', { keyPath: 'id', autoIncrement: true });
-          j.createIndex('turnId', 'turnId');
+          j.createIndex('setId', 'setId');
           j.createIndex('sessionId', 'sessionId');
           db.createObjectStore('meta');
         }
@@ -199,16 +211,18 @@ const DB = {
 const S = {
   session: null,          // current training session record
   turns: [],              // turns of the current session (ordered)
-  jumps: new Map(),       // turnId -> jumps[] for the current session
-  openTurn: null,         // turn being jumped right now
+  sets: [],               // sets of the current session (ordered by turn, then set number)
+  jumps: new Map(),       // setId -> jumps[] for the current session
+  openTurn: null,         // the person who is up right now (ends on "Next jumper")
+  openSet: null,          // the burst being jumped right now (ends when the trampoline is quiet)
   lastJump: null,         // most recent jump in the current session
   seen: new Set(),        // "index:timestamp" keys, to drop duplicates after backfill
   jumpers: [],            // [{name, lastUsed}] remembered across sessions
   view: 'live',
   viewSessionId: null,    // session shown on the Session screen (null = current)
-  namePrompts: [],        // turn ids waiting for "Who was jumping?"
-  overlayTurnId: null,
-  overlaySessionId: null,
+  nameSheet: null,        // { mode: 'next' | 'current', summary } while the name sheet is up
+  overlay: null,          // { kind: 'turn' | 'set', id } while the detail screen is up
+  historyOpen: false,     // is the "Previous sessions" group expanded?
   demo: null,
 };
 let idleTimer = null;
@@ -220,7 +234,7 @@ function enqueue(fn) {
 }
 
 /* ==========================================================================
-   Sessions / turns / jumps
+   Sessions -> turns (one person's go) -> sets (one burst) -> jumps
    ========================================================================== */
 function defaultSessionName(date, demo) {
   const d = date.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
@@ -229,7 +243,7 @@ function defaultSessionName(date, demo) {
 }
 
 async function createSession({ demo = false } = {}) {
-  await closeTurn({ prompt: false });
+  await closeTurn();
   const now = new Date();
   const s = { name: defaultSessionName(now, demo), createdAt: now.toISOString(), demo };
   s.id = await DB.put('sessions', s);
@@ -243,31 +257,40 @@ async function setCurrentSession(id) {
 }
 
 async function loadCurrentSession(id) {
-  S.session = null; S.turns = []; S.jumps = new Map(); S.openTurn = null; S.lastJump = null; S.seen = new Set();
+  S.session = null; S.turns = []; S.sets = []; S.jumps = new Map();
+  S.openTurn = null; S.openSet = null; S.lastJump = null; S.seen = new Set();
   if (id == null) return;
   const session = await DB.get('sessions', id);
   if (!session) { await DB.setMeta('currentSessionId', null); return; }
-  const { turns, jumps } = await loadSessionData(id);
+  const { turns, sets, jumps } = await loadSessionData(id);
   S.session = session;
   S.turns = turns;
+  S.sets = sets;
   S.jumps = jumps;
   for (const list of jumps.values()) for (const j of list) S.seen.add(`${j.index}:${j.timestamp}`);
-  const last = turns[turns.length - 1];
-  S.openTurn = last && !last.endedAt ? last : null;
+  // A turn stays open until someone taps "Next jumper", so it is simply the one
+  // with no end time; the same goes for the set inside it.
+  S.openTurn = turns.find((t) => !t.endedAt) || null;
+  S.openSet = S.openTurn ? sets.find((s) => s.turnId === S.openTurn.id && !s.endedAt) || null : null;
   let lastJump = null;
   for (const list of jumps.values()) for (const j of list) if (!lastJump || j.id > lastJump.id) lastJump = j;
   S.lastJump = lastJump;
 }
 
+const byNumber = (a, b) => a.number - b.number || a.id - b.id;
+
 async function loadSessionData(sessionId) {
-  const turns = (await DB.byIndex('turns', 'sessionId', sessionId)).sort((a, b) => a.number - b.number || a.id - b.id);
+  const turns = (await DB.byIndex('turns', 'sessionId', sessionId)).sort(byNumber);
+  const turnOrder = new Map(turns.map((t, i) => [t.id, i]));
+  const sets = (await DB.byIndex('sets', 'sessionId', sessionId))
+    .sort((a, b) => (turnOrder.get(a.turnId) ?? 0) - (turnOrder.get(b.turnId) ?? 0) || byNumber(a, b));
   const all = await DB.byIndex('jumps', 'sessionId', sessionId);
-  const jumps = new Map(turns.map((t) => [t.id, []]));
+  const jumps = new Map(sets.map((s) => [s.id, []]));
   for (const j of all.sort((a, b) => (a.order ?? a.id) - (b.order ?? b.id))) {
-    if (!jumps.has(j.turnId)) jumps.set(j.turnId, []);
-    jumps.get(j.turnId).push(j);
+    if (!jumps.has(j.setId)) jumps.set(j.setId, []);
+    jumps.get(j.setId).push(j);
   }
-  return { turns, jumps };
+  return { turns, sets, jumps };
 }
 
 function sessionLastActivity() {
@@ -281,14 +304,39 @@ async function ensureSession({ demo }) {
   if (!S.session || !!S.session.demo !== demo || stale) await createSession({ demo });
 }
 
-async function openTurn() {
+/* --- Turns and sets ------------------------------------------------------
+   A set opens on the first jump and closes when the trampoline goes quiet.
+   A turn collects every set one person did; only the "Next jumper" button (or
+   a new session) ends it, so nothing is ever split on a timer. */
+
+function setsOfTurn(turnId, sets = S.sets) { return sets.filter((s) => s.turnId === turnId); }
+function jumpsOfSet(setId, jumps = S.jumps) { return jumps.get(setId) || []; }
+function jumpsOfTurn(turnId, sets = S.sets, jumps = S.jumps) {
+  return setsOfTurn(turnId, sets).flatMap((s) => jumpsOfSet(s.id, jumps));
+}
+/** Time actually spent jumping — the rests between sets are left out. */
+function jumpingMs(jumps) { return jumps.reduce((a, j) => a + j.flightMs + j.contactMs, 0); }
+
+async function openTurn({ jumper = null } = {}) {
   const number = S.turns.reduce((m, t) => Math.max(m, t.number), 0) + 1;
-  const t = { sessionId: S.session.id, number, jumper: null, startedAt: new Date().toISOString(), endedAt: null, demo: !!S.session.demo };
+  const t = { sessionId: S.session.id, number, jumper, startedAt: new Date().toISOString(), endedAt: null, demo: !!S.session.demo };
   t.id = await DB.put('turns', t);
   S.turns.push(t);
-  S.jumps.set(t.id, []);
   S.openTurn = t;
+  if (jumper) await rememberJumper(jumper);
   return t;
+}
+
+async function openSet() {
+  if (!S.openTurn) await openTurn();
+  const turn = S.openTurn;
+  const number = setsOfTurn(turn.id).reduce((m, s) => Math.max(m, s.number), 0) + 1;
+  const st = { sessionId: S.session.id, turnId: turn.id, number, startedAt: new Date().toISOString(), endedAt: null, demo: !!S.session.demo };
+  st.id = await DB.put('sets', st);
+  S.sets.push(st);
+  S.jumps.set(st.id, []);
+  S.openSet = st;
+  return st;
 }
 
 async function handleJump(p) {
@@ -299,24 +347,25 @@ async function handleJump(p) {
   if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
 
   // Safety net for a missed idle message (e.g. it happened while disconnected).
+  // This only ever starts a new SET — the jumper is assumed to be the same one.
   const prev = S.lastJump;
-  if (S.openTurn && prev && prev.turnId === S.openTurn.id && CONFIG.turnGapMs > 0 &&
-      p.timestamp > prev.timestamp && p.timestamp - prev.timestamp > CONFIG.turnGapMs) {
-    console.info('[app] long gap between jumps, starting a new turn');
-    await closeTurn({ prompt: true });
+  if (S.openSet && prev && prev.setId === S.openSet.id && CONFIG.setGapMs > 0 &&
+      p.timestamp > prev.timestamp && p.timestamp - prev.timestamp > CONFIG.setGapMs) {
+    console.info('[app] long gap between jumps, starting a new set');
+    await closeSet();
   }
-  if (!S.openTurn) await openTurn();
+  if (!S.openSet) await openSet();
 
-  const turn = S.openTurn;
-  const list = S.jumps.get(turn.id);
+  const set = S.openSet;
+  const list = S.jumps.get(set.id);
   const now = new Date();
   const jump = {
-    sessionId: S.session.id, turnId: turn.id,
+    sessionId: S.session.id, setId: set.id,
     type: p.type, index: p.index, flightMs: p.flightMs, contactMs: p.contactMs, peakG: p.peakG,
     timestamp: p.timestamp, flags: p.flags,
     receivedAt: now.toISOString(), demo: !!S.session.demo,
   };
-  // Backfilled jumps can arrive after newer live ones: keep sensor order within the turn.
+  // Backfilled jumps can arrive after newer live ones: keep sensor order within the set.
   let pos = list.length;
   while (pos > 0 && list[pos - 1].index > p.index && list[pos - 1].timestamp > p.timestamp) pos--;
   if (pos === list.length) jump.order = Math.max(Date.now() * 1000, (list[pos - 1]?.order ?? 0) + 1);
@@ -330,31 +379,50 @@ async function handleJump(p) {
 }
 
 function handleIdle() {
-  if (!S.openTurn) return;
+  if (!S.openSet) return;
   if (CONFIG.idleGraceMs > 0) {
     if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => { idleTimer = null; enqueue(() => closeTurn({ prompt: true })); }, CONFIG.idleGraceMs);
+    idleTimer = setTimeout(() => { idleTimer = null; enqueue(() => closeSet()); }, CONFIG.idleGraceMs);
   } else {
-    return closeTurn({ prompt: true });
+    return closeSet();
   }
 }
 
-async function closeTurn({ prompt }) {
+/** End the current burst. A set nobody jumped in isn't worth keeping. */
+async function closeSet() {
   if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
-  const t = S.openTurn;
-  if (!t) return;
-  S.openTurn = null;
-  const list = S.jumps.get(t.id) || [];
-  if (!list.length) {  // a turn with no jumps isn't worth keeping
-    await DB.del('turns', t.id);
-    S.turns = S.turns.filter((x) => x.id !== t.id);
-    S.jumps.delete(t.id);
+  const st = S.openSet;
+  if (!st) return;
+  S.openSet = null;
+  const list = S.jumps.get(st.id) || [];
+  if (!list.length) {
+    await DB.del('sets', st.id);
+    S.sets = S.sets.filter((x) => x.id !== st.id);
+    S.jumps.delete(st.id);
   } else {
-    t.endedAt = new Date().toISOString();
-    await DB.put('turns', t);
-    if (prompt) queueNamePrompt(t.id);
+    st.endedAt = new Date().toISOString();
+    await DB.put('sets', st);
   }
   renderAfterData({});
+  return st;
+}
+
+/** End the person's go. Returns the turn, or null if nothing was recorded in it. */
+async function closeTurn() {
+  await closeSet();
+  const t = S.openTurn;
+  if (!t) return null;
+  S.openTurn = null;
+  if (!setsOfTurn(t.id).length) {      // named but never jumped — don't leave an empty turn behind
+    await DB.del('turns', t.id);
+    S.turns = S.turns.filter((x) => x.id !== t.id);
+    renderAfterData({});
+    return null;
+  }
+  t.endedAt = new Date().toISOString();
+  await DB.put('turns', t);
+  renderAfterData({});
+  return t;
 }
 
 async function nameTurn(turnId, name) {
@@ -380,28 +448,114 @@ async function rememberJumper(name) {
   await DB.setMeta('jumpers', S.jumpers);
 }
 
-async function deleteTurn(turnId) {
-  if (S.openTurn && S.openTurn.id === turnId) S.openTurn = null;
-  await DB.delByIndex('jumps', 'turnId', turnId);
-  await DB.del('turns', turnId);
-  if (S.session) {
-    S.turns = S.turns.filter((t) => t.id !== turnId);
-    S.jumps.delete(turnId);
-    S.lastJump = null;
-    for (const list of S.jumps.values()) for (const j of list) if (!S.lastJump || j.id > S.lastJump.id) S.lastJump = j;
+/** Renumber a session's turns and their sets 1..n, dropping any turn left with no sets. */
+async function normaliseSession(sessionId) {
+  const turns = (await DB.byIndex('turns', 'sessionId', sessionId)).sort(byNumber);
+  const sets = await DB.byIndex('sets', 'sessionId', sessionId);
+  let n = 0;
+  for (const t of turns) {
+    const own = sets.filter((s) => s.turnId === t.id).sort(byNumber);
+    if (!own.length && !(S.openTurn && S.openTurn.id === t.id)) { await DB.del('turns', t.id); continue; }
+    n += 1;
+    if (t.number !== n) { t.number = n; await DB.put('turns', t); }
+    for (let i = 0; i < own.length; i++) {
+      if (own[i].number !== i + 1) { own[i].number = i + 1; await DB.put('sets', own[i]); }
+    }
   }
-  S.namePrompts = S.namePrompts.filter((id) => id !== turnId);
+}
+
+async function reloadIfCurrent(sessionId) {
+  if (S.session && S.session.id === sessionId) await loadCurrentSession(sessionId);
+}
+
+async function deleteSet(setId) {
+  const st = S.sets.find((x) => x.id === setId) || (await DB.get('sets', setId));
+  if (!st) return;
+  if (S.openSet && S.openSet.id === setId) S.openSet = null;
+  await DB.delByIndex('jumps', 'setId', setId);
+  await DB.del('sets', setId);
+  await normaliseSession(st.sessionId);
+  await reloadIfCurrent(st.sessionId);
   renderAfterData({});
+}
+
+async function deleteTurn(turnId) {
+  const t = await findTurn(turnId);
+  if (!t) return;
+  if (S.openTurn && S.openTurn.id === turnId) { S.openTurn = null; S.openSet = null; }
+  for (const st of await DB.byIndex('sets', 'turnId', turnId)) {
+    await DB.delByIndex('jumps', 'setId', st.id);
+    await DB.del('sets', st.id);
+  }
+  await DB.del('turns', turnId);
+  await normaliseSession(t.sessionId);
+  await reloadIfCurrent(t.sessionId);
+  renderAfterData({});
+}
+
+/** This set and everything after it become a new turn — the fix for a missed "Next jumper" tap. */
+async function splitTurnAtSet(setId) {
+  const st = S.sets.find((x) => x.id === setId) || (await DB.get('sets', setId));
+  if (!st) return null;
+  const turn = await DB.get('turns', st.turnId);
+  if (!turn) return null;
+  const own = (await DB.byIndex('sets', 'turnId', turn.id)).sort(byNumber);
+  const i = own.findIndex((x) => x.id === setId);
+  if (i <= 0) return null;               // already the first set of its turn
+  const moving = own.slice(i);
+  const nt = {
+    sessionId: turn.sessionId, number: turn.number + 0.5, jumper: null,
+    startedAt: moving[0].startedAt, endedAt: turn.endedAt, demo: turn.demo,
+  };
+  nt.id = await DB.put('turns', nt);
+  turn.endedAt = own[i - 1].endedAt || turn.endedAt;   // the old turn now ends with its last remaining set
+  await DB.put('turns', turn);
+  for (let k = 0; k < moving.length; k++) {
+    moving[k].turnId = nt.id;
+    moving[k].number = k + 1;
+    await DB.put('sets', moving[k]);
+  }
+  if (S.openTurn && S.openTurn.id === turn.id) S.openTurn = null;   // the reload below works out which turn is open
+  await normaliseSession(turn.sessionId);
+  await reloadIfCurrent(turn.sessionId);
+  renderAfterData({});
+  return nt.id;
+}
+
+/** Fold a turn's sets into the turn above it, for when one person was split in two. */
+async function mergeTurnIntoPrevious(turnId) {
+  const turn = await DB.get('turns', turnId);
+  if (!turn) return null;
+  const turns = (await DB.byIndex('turns', 'sessionId', turn.sessionId)).sort(byNumber);
+  const i = turns.findIndex((t) => t.id === turnId);
+  if (i <= 0) return null;               // nothing above it
+  const prev = turns[i - 1];
+  let n = (await DB.byIndex('sets', 'turnId', prev.id)).length;
+  for (const s of (await DB.byIndex('sets', 'turnId', turnId)).sort(byNumber)) {
+    s.turnId = prev.id;
+    s.number = ++n;
+    await DB.put('sets', s);
+  }
+  prev.endedAt = turn.endedAt;
+  if (!prev.jumper && turn.jumper) prev.jumper = turn.jumper;
+  await DB.put('turns', prev);
+  await DB.del('turns', turnId);
+  if (S.openTurn && S.openTurn.id === turnId) S.openTurn = null;
+  await normaliseSession(turn.sessionId);
+  await reloadIfCurrent(turn.sessionId);
+  renderAfterData({});
+  return prev.id;
 }
 
 async function deleteSession(sessionId) {
   await DB.delByIndex('jumps', 'sessionId', sessionId);
+  await DB.delByIndex('sets', 'sessionId', sessionId);
   await DB.delByIndex('turns', 'sessionId', sessionId);
   await DB.del('sessions', sessionId);
   if (S.session && S.session.id === sessionId) {
     if (S.demo) stopDemo({ restore: false });
     await setCurrentSession(null);
-    S.namePrompts = [];
+    S.nameSheet = null;
   }
   if ((await DB.meta('lastRealSessionId')) === sessionId) await DB.setMeta('lastRealSessionId', null);
   renderAfterData({});
@@ -589,6 +743,9 @@ class DemoSensor {
   constructor(speed = 1) {
     this.speed = speed; this.running = false; this.index = 0; this.sample = 0;
     this.clock = 30000 + Math.floor(Math.random() * 90000);   // "ms since boot"
+    this.names = ['Ben', 'Amy', 'Sam', 'Mia', 'Joe', 'Ava'];
+    this.lastName = null;                                     // so the same person never goes twice in a row
+    this.target = 1.25;                                       // this jumper's typical air time (s)
   }
   rand(a, b) { return a + Math.random() * (b - a); }
   wait(ms) { return new Promise((r) => { this.timer = setTimeout(r, ms / this.speed); }); }
@@ -605,17 +762,28 @@ class DemoSensor {
     this.loop();
   }
   stop() { this.running = false; clearTimeout(this.timer); }
+  /* One person's go is several bursts with a breather between them; the loop
+     also plays the part of whoever taps "Next jumper" when they swap over. */
   async loop() {
     await this.wait(1200);
     while (this.running) {
-      await this.turn();
+      const others = this.names.filter((n) => n !== this.lastName);
+      this.lastName = others[Math.floor(Math.random() * others.length)];
+      await demoNextJumper(this.lastName);
+      this.target = this.rand(1.1, 1.45);
+      const sets = Math.round(this.rand(2, 4));
+      for (let i = 0; i < sets && this.running; i++) {
+        await this.set();
+        if (!this.running) return;
+        await this.wait(this.rand(4000, 8000));   // a rest, same jumper still on
+      }
       if (!this.running) break;
-      await this.wait(this.rand(6000, 11000));   // next jumper climbs on
+      await this.wait(this.rand(4000, 8000));     // the next jumper climbs on
     }
   }
-  async turn() {
-    const n = Math.round(this.rand(10, 30));
-    const target = this.rand(1.1, 1.45);     // this jumper's typical air time (s)
+  async set() {
+    const n = Math.round(this.rand(8, 22));
+    const target = this.target;
     this.state('REST', 'CONTACT');
     for (let i = 0; i < n && this.running; i++) {
       const warm = i < 4 ? (4 - i) * 0.09 : 0;          // build-up jumps are lower
@@ -643,6 +811,14 @@ class DemoSensor {
   }
 }
 
+/** The demo taps "Next jumper" for you, so a demo session shows real turns and sets. */
+async function demoNextJumper(name) {
+  if (!S.demo) return;
+  await enqueue(() => closeTurn());
+  if (S.session) await enqueue(() => openTurn({ jumper: name }));
+  renderAfterData({});
+}
+
 async function startDemo({ resume = false } = {}) {
   if (BLE.state === 'connected' || BLE.state === 'reconnecting') { toast('Disconnect the sensor before starting the demo.'); return; }
   if (S.demo) return;
@@ -667,14 +843,13 @@ async function stopDemo({ restore = true } = {}) {
   S.demo = null;
   Wake.disable();
   await DB.setMeta('demoActive', false);
-  await enqueue(() => closeTurn({ prompt: false }));
-  S.namePrompts = S.namePrompts.filter((id) => S.turns.every((t) => t.id !== id));
+  await enqueue(() => closeTurn());
+  closeNameSheet();
   if (restore) {
     const back = await DB.meta('lastRealSessionId');
     const exists = back != null && (await DB.get('sessions', back));
     await setCurrentSession(exists ? back : null);
   }
-  renderNameSheet();
   renderConnection();
   renderAfterData({});
 }
@@ -686,8 +861,9 @@ async function stopDemo({ restore = true } = {}) {
    ========================================================================== */
 let chartUid = 0;
 class JumpChart {
-  constructor(root, { live = false, fit = false, showDetail = true, emptyText = '' } = {}) {
+  constructor(root, { live = false, fit = false, showDetail = true, showSets = false, emptyText = '' } = {}) {
     this.root = root; this.live = live; this.fit = fit; this.showDetail = showDetail && !fit;
+    this.showSets = showSets;   // draw a divider and a "SET n" label where one burst ends and the next begins
     this.emptyText = emptyText;
     this.uid = ++chartUid;
     this.jumps = []; this.pinned = true; this.selected = null; this.newFrom = Infinity;
@@ -805,7 +981,21 @@ class JumpChart {
       groupW = Math.min(64, Math.max(22, (scrollerW - 16) / CONFIG.barsVisible));
       barW = Math.round(groupW * 0.8);
     }
-    const contentW = this.fit ? scrollerW : Math.max(scrollerW, n * groupW + 16);
+    // A turn is several sets (bursts) with a rest between them. Leave a gap and
+    // a divider at each set boundary so one person's go still reads as one chart.
+    const showSets = this.showSets && !this.fit;
+    const gapW = showSets ? Math.max(12, groupW * 0.5) : 0;
+    const xs = new Array(n);
+    const starts = [];          // index of the first jump of each set
+    let gaps = 0;
+    for (let i = 0; i < n; i++) {
+      if (i === 0 || (showSets && this.jumps[i].setId !== this.jumps[i - 1].setId)) {
+        if (i > 0) gaps++;
+        starts.push(i);
+      }
+      xs[i] = i * groupW + gaps * gapW;
+    }
+    const contentW = this.fit ? scrollerW : Math.max(scrollerW, n * groupW + gaps * gapW + 16);
     this.plot.setAttribute('width', contentW);
 
     // Vertical geometry (read after width is set so a scrollbar is accounted for)
@@ -813,7 +1003,7 @@ class JumpChart {
     this.plot.setAttribute('height', H);
     this.yAxis.setAttribute('height', H);
     const labels = !this.fit || groupW >= 46;
-    const top = labels ? 26 : 22, bottom = 30;
+    const top = labels ? 26 : 22, bottom = showSets && starts.length > 1 ? 48 : 30;
     const plotH = Math.max(40, H - top - bottom);
 
     let maxS = 0;
@@ -839,7 +1029,7 @@ class JumpChart {
     const labelEvery = this.fit ? Math.ceil(26 / groupW) : 1;
     for (let i = 0; i < n; i++) {
       const j = this.jumps[i];
-      const gx = i * groupW + (this.fit ? 3 : 8);
+      const gx = xs[i] + (this.fit ? 3 : 8);
       // One stacked bar per jump: bed (push-off contact) at the bottom, air on top.
       // Its height is the whole jump: flightMs + contactMs.
       const x0 = gx + (groupW - barW) / 2;
@@ -869,6 +1059,20 @@ class JumpChart {
         ${j.flags ? `<path class="flag-mark" d="M${(gx + groupW / 2).toFixed(1)} ${(top - 16).toFixed(1)} l4 7 h-8 z"><title>Flags ${j.flags}${ft ? ': ' + esc(ft) : ''}</title></path>` : ''}
       </g>`;
     }
+    // Set brackets under the x labels, and a divider between one set and the next.
+    if (showSets && starts.length > 1) {
+      for (let k = 0; k < starts.length; k++) {
+        const first = starts[k];
+        const last = (k + 1 < starts.length ? starts[k + 1] : n) - 1;
+        const x0 = xs[first] + 8, x1 = xs[last] + groupW + 8;
+        if (k > 0) {
+          const dx = (x0 - gapW / 2).toFixed(1);
+          out += `<line class="set-divider" x1="${dx}" x2="${dx}" y1="${top - 18}" y2="${(base + 30).toFixed(1)}"/>`;
+        }
+        out += `<line class="set-rule" x1="${(x0 + 3).toFixed(1)}" x2="${(x1 - 3).toFixed(1)}" y1="${(base + 30).toFixed(1)}" y2="${(base + 30).toFixed(1)}"/>
+          <text class="set-lab" x="${((x0 + x1) / 2).toFixed(1)}" y="${(base + 44).toFixed(1)}">SET ${k + 1}</text>`;
+      }
+    }
     out += `<line class="baseline" x1="0" x2="${contentW}" y1="${base}" y2="${base}"/>`;
     this.plot.innerHTML = out;
 
@@ -887,7 +1091,7 @@ function renderAfterData({ newJump = false } = {}) {
   renderLive({ newJump });
   if (S.view === 'session') renderSession();
   if (S.view === 'history') renderHistory();
-  if (S.overlayTurnId != null) renderTurnOverlay();
+  if (S.overlay) renderOverlay();
 }
 
 function renderConnection() {
@@ -918,35 +1122,60 @@ function renderLive({ newJump = false } = {}) {
   const turn = S.openTurn || S.turns[S.turns.length - 1] || null;
   const turnChanged = (turn ? turn.id : null) !== liveTurnId;
   liveTurnId = turn ? turn.id : null;
-  const jumps = turn ? S.jumps.get(turn.id) || [] : [];
+  const sets = turn ? setsOfTurn(turn.id) : [];
+  const jumps = turn ? jumpsOfTurn(turn.id) : [];      // the whole go, not just the burst on now
   const kicker = $('#live-kicker'), title = $('#live-title');
+  const nameBtn = $('#live-name-btn');
 
   if (!turn) {
     kicker.innerHTML = S.session ? esc(S.session.name) : '';
     title.textContent = S.session ? 'Waiting for first jump' : 'Ready for liftoff';
-  } else if (S.openTurn) {
-    kicker.innerHTML = `<span class="pill pill-live">Live</span> Turn ${turn.number}${S.session.demo ? ' <span class="pill pill-demo">Demo</span>' : ''}`;
-    title.textContent = 'Jumping now';
   } else {
-    kicker.innerHTML = `<span class="pill pill-done">Landed</span> Turn ${turn.number} · waiting for next jumper`;
-    title.textContent = turnLabel(turn);
+    const demoPill = S.session.demo ? ' <span class="pill pill-demo">Demo</span>' : '';
+    const nSets = `${sets.length} set${sets.length === 1 ? '' : 's'}`;
+    if (S.openSet) kicker.innerHTML = `<span class="pill pill-live">Live</span> Turn ${turn.number} · set ${sets.length}${demoPill}`;
+    else if (S.openTurn) kicker.innerHTML = `<span class="pill pill-done">Resting</span> Turn ${turn.number} · ${nSets} so far${demoPill}`;
+    else kicker.innerHTML = `<span class="pill pill-done">Landed</span> Turn ${turn.number} · ${nSets} · waiting for the next jumper${demoPill}`;
+    title.textContent = turn.jumper || (S.openTurn ? 'Tap to add a name' : turnLabel(turn));
   }
-  $('#end-turn-btn').hidden = !S.openTurn;
+  nameBtn.disabled = !S.openTurn;
+  nameBtn.classList.toggle('unnamed', !!turn && !turn.jumper);
+  $('#next-jumper-btn').hidden = !S.openTurn;
   $('#live-stats').innerHTML = statsHTML(jumps);
   liveChart.setJumps(jumps, { animate: newJump && !turnChanged, resetView: turnChanged });
 }
 
-function turnCardHTML(t, jumps, isOpen) {
-  const s = computeStats(jumps);
+function sparkHTML(jumps) {
   const maxF = Math.max(1, ...jumps.map((j) => j.flightMs));
   const w = 100 / Math.max(jumps.length, 12);
-  const spark = jumps.map((j, i) => `<rect x="${(i * w + w * 0.15).toFixed(2)}" width="${(w * 0.7).toFixed(2)}" y="${(22 - (j.flightMs / maxF) * 22).toFixed(1)}" height="${((j.flightMs / maxF) * 22).toFixed(1)}"/>`).join('');
-  return `<li><button type="button" class="card-btn turn-card${isOpen ? ' open' : ''}" data-turn="${t.id}">
-    <span class="turn-num">${t.number}</span>
-    <span class="turn-who${t.jumper ? '' : ' unnamed'}">${esc(turnLabel(t))}</span>
-    <span class="turn-tof">${secs(s.tof)}<small>s air</small></span>
-    <span class="turn-meta">${isOpen ? '<span class="pill pill-live">Jumping now</span> ' : ''}${fmtTime(t.startedAt)} · ${s.n} jump${s.n === 1 ? '' : 's'}</span>
-    <svg class="spark" viewBox="0 0 100 22" preserveAspectRatio="none" aria-hidden="true">${spark}</svg>
+  const bars = jumps.map((j, i) => `<rect x="${(i * w + w * 0.15).toFixed(2)}" width="${(w * 0.7).toFixed(2)}" y="${(22 - (j.flightMs / maxF) * 22).toFixed(1)}" height="${((j.flightMs / maxF) * 22).toFixed(1)}"/>`).join('');
+  return `<svg class="spark" viewBox="0 0 100 22" preserveAspectRatio="none" aria-hidden="true">${bars}</svg>`;
+}
+
+/** One person's go: a heading with their combined numbers, then a row per set. */
+function turnGroupHTML(t, sets, jumps, openTurnId, openSetId) {
+  const all = sets.flatMap((s) => jumpsOfSet(s.id, jumps));
+  const st = computeStats(all);
+  const isOpen = t.id === openTurnId;
+  return `<li class="turn-group">
+    <button type="button" class="card-btn turn-card${isOpen ? ' open' : ''}" data-turn="${t.id}">
+      <span class="turn-num">${t.number}</span>
+      <span class="turn-who${t.jumper ? '' : ' unnamed'}">${esc(turnLabel(t))}</span>
+      <span class="turn-tof">${secs(st.tof)}<small>s air</small></span>
+      <span class="turn-meta">${isOpen ? '<span class="pill pill-live">On now</span> ' : ''}${fmtTime(t.startedAt)} · ${sets.length} set${sets.length === 1 ? '' : 's'} · ${st.n} jump${st.n === 1 ? '' : 's'}</span>
+    </button>
+    ${sets.length ? `<ol class="set-list">${sets.map((s) => setCardHTML(s, jumpsOfSet(s.id, jumps), s.id === openSetId)).join('')}</ol>`
+      : '<p class="set-empty">Waiting for the first jump of this turn.</p>'}
+  </li>`;
+}
+
+function setCardHTML(st, jumps, isOpen) {
+  const s = computeStats(jumps);
+  return `<li><button type="button" class="card-btn set-card${isOpen ? ' open' : ''}" data-set="${st.id}">
+    <span class="set-label">Set ${st.number}</span>
+    <span class="set-tof">${secs(s.tof)}<small>s air</small></span>
+    <span class="set-meta">${isOpen ? '<span class="pill pill-live">Jumping</span> ' : ''}${fmtTime(st.startedAt)} · ${s.n} jump${s.n === 1 ? '' : 's'}</span>
+    ${sparkHTML(jumps)}
   </button></li>`;
 }
 
@@ -959,15 +1188,17 @@ async function renderSession() {
     return;
   }
   const isCurrent = S.session && viewingId === S.session.id;
-  let session, turns, jumps;
-  if (isCurrent) { session = S.session; turns = S.turns; jumps = S.jumps; }
+  let session, turns, sets, jumps;
+  if (isCurrent) { session = S.session; turns = S.turns; sets = S.sets; jumps = S.jumps; }
   else {
     session = await DB.get('sessions', viewingId);
     if (!session) { S.viewSessionId = null; return renderSession(); }
-    ({ turns, jumps } = await loadSessionData(viewingId));
+    ({ turns, sets, jumps } = await loadSessionData(viewingId));
   }
-  const all = turns.flatMap((t) => jumps.get(t.id) || []);
+  const all = sets.flatMap((s) => jumpsOfSet(s.id, jumps));
   const tot = computeStats(all);
+  const openTurnId = isCurrent && S.openTurn ? S.openTurn.id : null;
+  const openSetId = isCurrent && S.openSet ? S.openSet.id : null;
   const main = $('main'); const scroll = main.scrollTop;
   root.innerHTML = `
     ${S.viewSessionId != null ? '<button type="button" class="btn-back back-link" data-action="back-history"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>History</button>' : ''}
@@ -977,7 +1208,7 @@ async function renderSession() {
         <h1 id="session-title" class="page-title">${esc(session.name)}</h1>
         <button type="button" class="icon-btn" data-action="rename-session" aria-label="Rename session"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/></svg></button>
       </div>
-      <p class="page-meta"><span>${turns.length} turn${turns.length === 1 ? '' : 's'}</span><span>${tot.n} jumps</span><span>${secs(tot.tof)} s total air</span></p>
+      <p class="page-meta"><span>${turns.length} turn${turns.length === 1 ? '' : 's'}</span><span>${sets.length} set${sets.length === 1 ? '' : 's'}</span><span>${tot.n} jumps</span><span>${secs(tot.tof)} s total air</span></p>
     </div>
     <div class="toolbar">
       <button type="button" class="btn-small btn-outline" data-action="csv-session">Export CSV</button>
@@ -986,33 +1217,89 @@ async function renderSession() {
       <button type="button" class="btn-small btn-outline btn-danger" data-action="delete-session">Delete session</button>
     </div>
     <h2 class="section-label">Turns</h2>
-    ${turns.length ? `<ol class="list">${turns.map((t) => turnCardHTML(t, jumps.get(t.id) || [], isCurrent && S.openTurn && S.openTurn.id === t.id)).join('')}</ol>`
-      : '<div class="empty"><strong>No turns yet</strong>A turn starts with the first jump and ends when the trampoline goes quiet.</div>'}`;
+    ${turns.length ? `<ol class="list turn-list">${turns.map((t) => turnGroupHTML(t, setsOfTurn(t.id, sets), jumps, openTurnId, openSetId)).join('')}</ol>`
+      : '<div class="empty"><strong>No turns yet</strong>A turn holds everything one person jumps. Each burst between rests is a set; tap “Next jumper” when someone swaps.</div>'}`;
   root.dataset.sessionId = session.id;
   main.scrollTop = scroll;
+}
+
+/** Local calendar day of an ISO timestamp, as YYYY-MM-DD. */
+function dayKey(iso) {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function dayLabel(key) {
+  const today = dayKey(new Date().toISOString());
+  if (key === today) return 'Today';
+  const y = new Date(); y.setDate(y.getDate() - 1);
+  if (key === dayKey(y.toISOString())) return 'Yesterday';
+  return fmtDate(`${key}T12:00:00`);
+}
+/** How much of the device's storage this app is using, or null if the browser won't say. */
+async function storageUsed() {
+  try {
+    if (!navigator.storage || !navigator.storage.estimate) return null;
+    const e = await navigator.storage.estimate();
+    return typeof e.usage === 'number' ? e.usage : null;
+  } catch (err) { return null; }
+}
+function fmtBytes(b) {
+  if (b == null) return '';
+  return b < 1024 * 1024 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function sessionCardHTML(s, setCounts, turnCounts) {
+  const turns = turnCounts.get(s.id) || 0;
+  const sets = setCounts.get(s.id) || 0;
+  return `<li><button type="button" class="card-btn session-card" data-session="${s.id}">
+    <span class="session-name">${esc(s.name)}${s.demo ? ' <span class="pill pill-demo">Demo</span>' : ''}${S.session && S.session.id === s.id ? ' <span class="pill pill-current">Current</span>' : ''}</span>
+    <span class="chev"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+    <span class="session-meta">${fmtTime(s.createdAt)} · ${turns} turn${turns === 1 ? '' : 's'} · ${sets} set${sets === 1 ? '' : 's'}</span>
+  </button></li>`;
 }
 
 async function renderHistory() {
   const root = $('#history-content');
   const sessions = (await DB.all('sessions')).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const turns = await DB.all('turns');
-  const counts = new Map();
-  for (const t of turns) counts.set(t.sessionId, (counts.get(t.sessionId) || 0) + 1);
+  const turnCounts = new Map(), setCounts = new Map();
+  for (const t of await DB.all('turns')) turnCounts.set(t.sessionId, (turnCounts.get(t.sessionId) || 0) + 1);
+  for (const s of await DB.all('sets')) setCounts.set(s.sessionId, (setCounts.get(s.sessionId) || 0) + 1);
   const hasDemo = sessions.some((s) => s.demo);
+  const today = dayKey(new Date().toISOString());
+  const todays = sessions.filter((s) => dayKey(s.createdAt) === today);
+  const older = sessions.filter((s) => dayKey(s.createdAt) !== today);
+  const used = await storageUsed();
+
+  // Older sessions are grouped by the day they happened on.
+  const days = [];
+  for (const s of older) {
+    const k = dayKey(s.createdAt);
+    if (!days.length || days[days.length - 1].key !== k) days.push({ key: k, list: [] });
+    days[days.length - 1].list.push(s);
+  }
+
   root.innerHTML = `
     <div class="page-head"><h1 id="history-title" class="page-title">History</h1>
-      <p class="page-meta">${sessions.length} training session${sessions.length === 1 ? '' : 's'} saved on this device</p></div>
+      <p class="page-meta"><span>${sessions.length} session${sessions.length === 1 ? '' : 's'} saved on this device</span>${used != null ? `<span>${fmtBytes(used)} used</span>` : ''}</p></div>
     <div class="toolbar">
       ${sessions.length ? '<button type="button" class="btn-small btn-outline" data-action="csv-all">Export everything (CSV)</button>' : ''}
       ${hasDemo ? '<button type="button" class="btn-small btn-outline btn-danger" data-action="delete-demo">Delete all demo data</button>' : ''}
     </div>
-    ${sessions.length ? `<ul class="list">${sessions.map((s) => `
-      <li><button type="button" class="card-btn session-card" data-session="${s.id}">
-        <span class="session-name">${esc(s.name)}${s.demo ? ' <span class="pill pill-demo">Demo</span>' : ''}${S.session && S.session.id === s.id ? ' <span class="pill pill-current">Current</span>' : ''}</span>
-        <span class="chev"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-        <span class="session-meta">${fmtDate(s.createdAt)} · ${fmtTime(s.createdAt)} · ${counts.get(s.id) || 0} turn${counts.get(s.id) === 1 ? '' : 's'}</span>
-      </button></li>`).join('')}</ul>`
-      : '<div class="empty"><strong>Nothing saved yet</strong>Your training sessions will be listed here, newest first.</div>'}`;
+    ${sessions.length ? '' : '<div class="empty"><strong>Nothing saved yet</strong>Your training sessions will be listed here, newest first.</div>'}
+    ${todays.length ? `<h2 class="section-label">Today</h2>
+      <ul class="list">${todays.map((s) => sessionCardHTML(s, setCounts, turnCounts)).join('')}</ul>` : ''}
+    ${older.length ? `
+      <div class="group-head">
+        <button type="button" class="group-toggle" data-action="toggle-older" aria-expanded="${S.historyOpen}">
+          <svg class="group-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Previous sessions</span>
+          <span class="group-count">${older.length}</span>
+        </button>
+        <button type="button" class="btn-small btn-outline btn-danger" data-action="clear-older">Clear</button>
+      </div>
+      ${S.historyOpen ? days.map((d) => `<h3 class="day-label">${esc(dayLabel(d.key))}</h3>
+        <ul class="list">${d.list.map((s) => sessionCardHTML(s, setCounts, turnCounts)).join('')}</ul>`).join('')
+        : '<p class="group-hint">Everything from before today. Tap to open.</p>'}` : ''}`;
 }
 
 function showView(view, { sessionId = null } = {}) {
@@ -1026,77 +1313,119 @@ function showView(view, { sessionId = null } = {}) {
   if (view === 'history') renderHistory();
 }
 
-/* ---------- Turn detail overlay ---------- */
-async function openTurnOverlay(turnId) {
-  S.overlayTurnId = turnId;
+/* ---------- Turn / set detail overlay ---------- */
+async function openOverlay(kind, id) {
+  S.overlay = { kind, id };
   $('#turn-overlay').hidden = false;
   document.body.style.overflow = 'hidden';
-  await renderTurnOverlay(true);
+  await renderOverlay(true);
   $('[data-close-turn]').focus();
 }
-function closeTurnOverlay() {
-  S.overlayTurnId = null;
+function closeOverlay() {
+  S.overlay = null;
   $('#turn-overlay').hidden = true;
   document.body.style.overflow = '';
 }
-async function getTurnWithJumps(turnId) {
-  const local = S.turns.find((t) => t.id === turnId);
-  if (local) return { turn: local, jumps: S.jumps.get(turnId) || [], session: S.session };
+
+/** A whole turn with its sets and their jumps, from memory if it is the current session. */
+async function getTurnData(turnId) {
+  if (S.session && S.turns.some((t) => t.id === turnId)) {
+    return { turn: S.turns.find((t) => t.id === turnId), sets: setsOfTurn(turnId), jumps: S.jumps, session: S.session };
+  }
   const turn = await DB.get('turns', turnId);
   if (!turn) return null;
-  const jumps = (await DB.byIndex('jumps', 'turnId', turnId)).sort((a, b) => (a.order ?? a.id) - (b.order ?? b.id));
-  const session = await DB.get('sessions', turn.sessionId);
-  return { turn, jumps, session };
+  const sets = (await DB.byIndex('sets', 'turnId', turnId)).sort(byNumber);
+  const jumps = new Map();
+  for (const s of sets) jumps.set(s.id, (await DB.byIndex('jumps', 'setId', s.id)).sort((a, b) => (a.order ?? a.id) - (b.order ?? b.id)));
+  return { turn, sets, jumps, session: await DB.get('sessions', turn.sessionId) };
 }
-async function renderTurnOverlay(first = false) {
-  const data = await getTurnWithJumps(S.overlayTurnId);
-  if (!data) { closeTurnOverlay(); return; }
-  const { turn, jumps, session } = data;
-  const isOpen = S.openTurn && S.openTurn.id === turn.id;
-  $('#turn-overlay-kicker').innerHTML = `${isOpen ? '<span class="pill pill-live">Jumping now</span> ' : ''}Turn ${turn.number} · ${fmtTime(turn.startedAt)} · ${esc(session ? session.name : '')}`;
-  $('#turn-overlay-title').textContent = turnLabel(turn);
-  $('#turn-overlay-stats').innerHTML = statsHTML(jumps);
-  overlayChart.live = isOpen;
-  overlayChart.setJumps(jumps, { resetView: first, animate: !first });
-  $('#turn-delete-btn').disabled = isOpen;
-  $('#turn-delete-btn').title = isOpen ? 'This turn is still going — end it first' : '';
+/** The same, plus the one set being looked at and its jumps. */
+async function getSetData(setId) {
+  const set = (S.session && S.sets.find((s) => s.id === setId)) || (await DB.get('sets', setId));
+  if (!set) return null;
+  const data = await getTurnData(set.turnId);
+  if (!data) return null;
+  return Object.assign({}, data, { set, list: jumpsOfSet(setId, data.jumps) });
+}
+async function getOverlayData(kind, id) {
+  const data = kind === 'turn' ? await getTurnData(id) : await getSetData(id);
+  if (!data) return null;
+  data.isTurn = kind === 'turn';
+  data.list = data.isTurn ? data.sets.flatMap((s) => jumpsOfSet(s.id, data.jumps)) : data.list;
+  return data;
+}
+
+async function renderOverlay(first = false) {
+  if (!S.overlay) return;
+  const showing = S.overlay;
+  const data = await getOverlayData(showing.kind, showing.id);
+  if (S.overlay !== showing) return;    // switched screens while we were reading
+  if (!data) { closeOverlay(); return; }
+  const { turn, sets, session, set, list, isTurn } = data;
+  const liveTurn = !!(S.openTurn && S.openTurn.id === turn.id);
+  const liveSet = !isTurn && !!(S.openSet && S.openSet.id === set.id);
+  const where = `${esc(session ? session.name : '')} · ${fmtTime(isTurn ? turn.startedAt : set.startedAt)}`;
+
+  $('#turn-overlay-kicker').innerHTML = isTurn
+    ? `${liveTurn ? '<span class="pill pill-live">On now</span> ' : ''}Turn ${turn.number} · ${sets.length} set${sets.length === 1 ? '' : 's'} · ${where}`
+    : `${liveSet ? '<span class="pill pill-live">Jumping</span> ' : ''}Turn ${turn.number} · ${esc(turnLabel(turn))} · ${where}`;
+  $('#turn-overlay-title').textContent = isTurn ? turnLabel(turn) : `Set ${set.number}`;
+  $('#turn-overlay-stats').innerHTML = statsHTML(list);
+  overlayChart.live = isTurn ? liveTurn : liveSet;
+  overlayChart.showSets = isTurn;             // a turn's chart is divided set by set
+  overlayChart.setJumps(list, { resetView: first, animate: !first });
+
+  const setIndex = isTurn ? -1 : sets.findIndex((s) => s.id === set.id);
+  const isLive = isTurn ? liveTurn : liveSet;
+  $('#turn-overlay-actions').innerHTML = [
+    '<button type="button" class="btn-primary" data-act="results">Results card</button>',
+    isTurn ? '<button type="button" class="btn-outline" data-act="rename">Name / rename</button>' : '',
+    !isTurn && setIndex > 0 ? '<button type="button" class="btn-outline" data-act="split">Start a new turn here</button>' : '',
+    isTurn && turn.number > 1 ? `<button type="button" class="btn-outline" data-act="merge">Merge into turn ${turn.number - 1}</button>` : '',
+    '<button type="button" class="btn-outline" data-act="csv">Export CSV</button>',
+    `<button type="button" class="btn-outline btn-danger" data-act="delete"${isLive ? ' disabled title="Still going — tap Next jumper first"' : ''}>Delete ${isTurn ? 'turn' : 'set'}</button>`,
+  ].filter(Boolean).join('');
 }
 
 /* ---------- Results card ---------- */
-async function openResults(turnId) {
-  const data = await getTurnWithJumps(turnId);
+async function openResults(kind, id) {
+  const data = await getOverlayData(kind, id);
   if (!data) return;
-  const { turn, jumps, session } = data;
-  const s = computeStats(jumps);
-  $('#rc-date').textContent = fmtDate(turn.startedAt);
+  const { turn, sets, session, set, list, isTurn } = data;
+  const s = computeStats(list);
+  $('#rc-date').textContent = fmtDate(isTurn ? turn.startedAt : set.startedAt);
   $('#rc-name').textContent = turnLabel(turn);
-  $('#rc-session').textContent = `${session ? session.name : ''} · Turn ${turn.number}`;
+  $('#rc-session').textContent = `${session ? session.name : ''} · Turn ${turn.number} · ${isTurn ? `${sets.length} set${sets.length === 1 ? '' : 's'}` : `set ${set.number}`}`;
   $('#rc-tof').innerHTML = `${secs(s.tof)}<small>s</small>`;
-  const durS = Math.round(jumps.reduce((a, j) => a + j.flightMs + j.contactMs, 0) / 1000);
+  // Time actually spent jumping: the rests between a turn's sets don't count.
+  const durS = Math.round(jumpingMs(list) / 1000);
   const cell = (cls, label, val) => `<div class="rc-stat ${cls}"><span>${label}</span><b>${val}</b></div>`;
   $('#rc-grid').innerHTML =
     cell('', 'Jumps', s.n) +
     cell('air', 'Best air', `${secs(s.best)}<small>s</small>`) +
     cell('air', 'Avg air', `${secs(s.avgAir)}<small>s</small>`) +
-    cell('', 'Duration', `${Math.floor(durS / 60)}:${String(durS % 60).padStart(2, '0')}`) +
+    cell('', 'Jumping', `${Math.floor(durS / 60)}:${String(durS % 60).padStart(2, '0')}`) +
     cell('bed', 'Avg bed', `${secs(s.avgBed)}<small>s</small>`) +
     cell('', 'Peak G', `${s.peak.toFixed(1)}<small>g</small>`);
   $('#results').hidden = false;
   document.body.style.overflow = 'hidden';
-  resultsChart.setJumps(jumps, { resetView: true });
+  resultsChart.setJumps(list, { resetView: true });
   requestAnimationFrame(() => resultsChart.render());
   $('#results-close').focus();
 }
 function closeResults() {
   $('#results').hidden = true;
-  if (S.overlayTurnId == null) document.body.style.overflow = '';
+  if (!S.overlay) document.body.style.overflow = '';
 }
 
-/* ---------- "Who was jumping?" sheet ---------- */
-function queueNamePrompt(turnId) {
-  if (!S.namePrompts.includes(turnId)) S.namePrompts.push(turnId);
+/* ---------- "Who's up?" sheet ----------
+   'next'    = the go that just ended, so name the one about to start
+   'current' = put a name on the go that is on now                        */
+function openNameSheet(mode, { summary = '', exclude = '' } = {}) {
+  S.nameSheet = { mode, summary, exclude };
   renderNameSheet();
 }
+function closeNameSheet() { S.nameSheet = null; renderNameSheet(); }
 function chipsHTML(exclude = '') {
   return S.jumpers.slice(0, 8)
     .filter((j) => j.name !== exclude)
@@ -1104,31 +1433,41 @@ function chipsHTML(exclude = '') {
 }
 function renderNameSheet() {
   const sheet = $('#name-sheet');
-  const id = S.namePrompts[0];
-  const turn = id != null ? S.turns.find((t) => t.id === id) : null;
-  if (!turn) {
-    if (id != null) { S.namePrompts.shift(); return renderNameSheet(); }
-    sheet.hidden = true; return;
-  }
-  const s = computeStats(S.jumps.get(turn.id) || []);
-  const more = S.namePrompts.length - 1;
-  $('#name-sheet-sub').textContent = `Turn ${turn.number} · ${s.n} jumps · ${secs(s.tof)} s air${more > 0 ? ` · ${more} more waiting` : ''}`;
-  $('#name-sheet-chips').innerHTML = chipsHTML();
+  if (!S.nameSheet || !S.session) { sheet.hidden = true; return; }
+  $('#name-sheet-title').textContent = S.nameSheet.mode === 'next' ? "Who's up?" : "Who's jumping?";
+  $('#name-sheet-sub').textContent = S.nameSheet.summary;
+  $('#name-sheet-chips').innerHTML = chipsHTML(S.nameSheet.exclude);   // whoever just finished isn't up next
   const wasHidden = sheet.hidden;
-  sheet.dataset.turn = turn.id;
   sheet.hidden = false;
-  if (wasHidden) { $('#name-sheet-input').value = ''; }
+  if (wasHidden) $('#name-sheet-input').value = '';
 }
 async function answerNameSheet(name) {
-  const id = Number($('#name-sheet').dataset.turn);
-  S.namePrompts = S.namePrompts.filter((x) => x !== id);
+  const mode = S.nameSheet ? S.nameSheet.mode : 'current';
+  S.nameSheet = null;
   $('#name-sheet-input').value = '';
   $('#name-sheet').hidden = true;
-  if (name) {
-    await nameTurn(id, name);
-    toast(`Saved for ${name}`, { label: 'Results', fn: () => openResults(id) });
+  const clean = name ? name.trim().slice(0, 40) : null;
+  if (clean && S.session) {
+    if (mode === 'next') {
+      // Open the turn straight away so the live screen can show who is on.
+      await enqueue(() => openTurn({ jumper: clean }));
+    } else {
+      const t = S.openTurn || S.turns[S.turns.length - 1];
+      if (t) await nameTurn(t.id, clean);
+    }
   }
-  renderNameSheet();
+  renderAfterData({});
+}
+
+/** The "Next jumper" tap: end this person's go, then ask who is on next. */
+async function nextJumper() {
+  const t = await enqueue(() => closeTurn());
+  let summary = 'Nothing was recorded for the last turn.';
+  if (t) {
+    const s = computeStats(jumpsOfTurn(t.id));
+    summary = `${turnLabel(t)} finished · ${s.n} jump${s.n === 1 ? '' : 's'} · ${secs(s.tof)} s air`;
+  }
+  openNameSheet('next', { summary, exclude: t && t.jumper ? t.jumper : '' });
 }
 
 /* ---------- Dialogs ---------- */
@@ -1168,28 +1507,32 @@ function toast(msg, action) {
 /* ==========================================================================
    CSV export
    ========================================================================== */
-const CSV_COLUMNS = ['session_name', 'session_date', 'turn_number', 'jumper_name', 'type', 'index', 'flightMs', 'contactMs', 'peakG', 'timestamp', 'flags', 'received_time'];
+const CSV_COLUMNS = ['session_name', 'session_date', 'turn_number', 'jumper_name', 'set_number', 'type', 'index', 'flightMs', 'contactMs', 'peakG', 'timestamp', 'flags', 'received_time'];
 function csvCell(v) {
   const s = v == null ? '' : String(v);
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
-async function buildCsv({ sessionId = null, turnId = null } = {}) {
+async function buildCsv({ sessionId = null, turnId = null, setId = null } = {}) {
   let sessions = await DB.all('sessions');
   let turns = await DB.all('turns');
+  let sets = await DB.all('sets');
   let jumps = await DB.all('jumps');
-  if (sessionId != null) { sessions = sessions.filter((s) => s.id === sessionId); }
-  if (turnId != null) { turns = turns.filter((t) => t.id === turnId); }
+  if (sessionId != null) sessions = sessions.filter((s) => s.id === sessionId);
+  if (turnId != null) turns = turns.filter((t) => t.id === turnId);
+  if (setId != null) sets = sets.filter((s) => s.id === setId);
   const sById = new Map(sessions.map((s) => [s.id, s]));
   const tById = new Map(turns.filter((t) => sById.has(t.sessionId)).map((t) => [t.id, t]));
-  jumps = jumps.filter((j) => tById.has(j.turnId));
+  const stById = new Map(sets.filter((s) => tById.has(s.turnId)).map((s) => [s.id, s]));
+  jumps = jumps.filter((j) => stById.has(j.setId));
   jumps.sort((a, b) => {
-    const ta = tById.get(a.turnId), tb = tById.get(b.turnId);
-    return ta.sessionId - tb.sessionId || ta.number - tb.number || (a.order ?? a.id) - (b.order ?? b.id);
+    const sa = stById.get(a.setId), sb = stById.get(b.setId);
+    const ta = tById.get(sa.turnId), tb = tById.get(sb.turnId);
+    return ta.sessionId - tb.sessionId || ta.number - tb.number || sa.number - sb.number || (a.order ?? a.id) - (b.order ?? b.id);
   });
   const rows = [CSV_COLUMNS.join(',')];
   for (const j of jumps) {
-    const t = tById.get(j.turnId), s = sById.get(t.sessionId);
-    rows.push([s.name, s.createdAt, t.number, t.jumper || '', j.type, j.index, j.flightMs, j.contactMs, j.peakG, j.timestamp, j.flags, j.receivedAt].map(csvCell).join(','));
+    const st = stById.get(j.setId), t = tById.get(st.turnId), s = sById.get(t.sessionId);
+    rows.push([s.name, s.createdAt, t.number, t.jumper || '', st.number, j.type, j.index, j.flightMs, j.contactMs, j.peakG, j.timestamp, j.flags, j.receivedAt].map(csvCell).join(','));
   }
   return rows.join('\r\n') + '\r\n';
 }
@@ -1223,7 +1566,11 @@ function wireEvents() {
   $('#reconnect-btn').addEventListener('click', () => BLE.manualReconnect());
   $('#demo-btn').addEventListener('click', () => startDemo());
   $('#demo-stop').addEventListener('click', () => stopDemo());
-  $('#end-turn-btn').addEventListener('click', () => enqueue(() => closeTurn({ prompt: true })));
+  $('#next-jumper-btn').addEventListener('click', () => nextJumper());
+  $('#live-name-btn').addEventListener('click', () => {
+    if (!S.openTurn) return;
+    openNameSheet('current', { summary: `Turn ${S.openTurn.number} · on the trampoline now` });
+  });
 
   $$('.tab').forEach((t) => t.addEventListener('click', () => showView(t.dataset.tab)));
 
@@ -1238,8 +1585,10 @@ function wireEvents() {
 
   // Session screen
   $('#session-content').addEventListener('click', async (e) => {
-    const card = e.target.closest('[data-turn]');
-    if (card) return openTurnOverlay(Number(card.dataset.turn));
+    const setCard = e.target.closest('[data-set]');
+    if (setCard) return openOverlay('set', Number(setCard.dataset.set));
+    const turnCard = e.target.closest('[data-turn]');
+    if (turnCard) return openOverlay('turn', Number(turnCard.dataset.turn));
     const btn = e.target.closest('[data-action]');
     if (!btn) return;
     const sid = Number($('#session-content').dataset.sessionId);
@@ -1250,13 +1599,13 @@ function wireEvents() {
       case 'rename-session': { const n = await nameDialog('Rename session', session.name); if (n) await renameSession(sid, n); break; }
       case 'csv-session': await exportCsv({ sessionId: sid }, session.name); break;
       case 'new-session':
-        if (await confirmDialog('Start a new session?', 'The current session is saved in History. New turns will go into a fresh session.', 'Start new')) {
+        if (await confirmDialog('Start a new session?', 'The current session is saved in History. The turn on now is closed and new ones go into a fresh session.', 'Start new')) {
           await enqueue(() => createSession({ demo: !!S.demo }));
           renderAfterData({}); toast('New session started');
         }
         break;
       case 'delete-session':
-        if (await confirmDialog('Delete this session?', `“${session.name}” and all its turns and jumps will be permanently deleted from this device.`)) {
+        if (await confirmDialog('Delete this session?', `“${session.name}” and all its turns, sets and jumps will be permanently deleted from this device.`)) {
           await enqueue(() => deleteSession(sid));
           showView(S.viewSessionId != null ? 'history' : 'session');
           toast('Session deleted');
@@ -1272,6 +1621,17 @@ function wireEvents() {
     const btn = e.target.closest('[data-action]');
     if (!btn) return;
     if (btn.dataset.action === 'csv-all') await exportCsv({}, 'all-sessions');
+    if (btn.dataset.action === 'toggle-older') { S.historyOpen = !S.historyOpen; return renderHistory(); }
+    if (btn.dataset.action === 'clear-older') {
+      const today = dayKey(new Date().toISOString());
+      const older = (await DB.all('sessions')).filter((s) => dayKey(s.createdAt) !== today);
+      if (!older.length) return;
+      if (await confirmDialog('Clear previous sessions?',
+        `${older.length} session${older.length === 1 ? '' : 's'} from before today will be permanently deleted from this device. Export everything first if you want to keep the numbers.`, 'Clear')) {
+        for (const s of older) await enqueue(() => deleteSession(s.id));
+        renderHistory(); toast(`Cleared ${older.length} session${older.length === 1 ? '' : 's'}`);
+      }
+    }
     if (btn.dataset.action === 'delete-demo') {
       if (await confirmDialog('Delete all demo data?', 'Every session marked “Demo” will be deleted. Your real training data is not touched.')) {
         const demos = (await DB.all('sessions')).filter((s) => s.demo);
@@ -1281,28 +1641,55 @@ function wireEvents() {
     }
   });
 
-  // Turn overlay
-  $('[data-close-turn]').addEventListener('click', closeTurnOverlay);
-  $('#turn-results-btn').addEventListener('click', () => openResults(S.overlayTurnId));
-  $('#turn-rename-btn').addEventListener('click', async () => {
-    const data = await getTurnWithJumps(S.overlayTurnId);
-    const n = await nameDialog('Who was jumping?', data.turn.jumper || '', { chips: true });
-    if (n !== null) {
-      await nameTurn(data.turn.id, n);
-      S.namePrompts = S.namePrompts.filter((x) => x !== data.turn.id); renderNameSheet();
-      renderTurnOverlay();
-    }
-  });
-  $('#turn-csv-btn').addEventListener('click', async () => {
-    const data = await getTurnWithJumps(S.overlayTurnId);
-    await exportCsv({ turnId: data.turn.id, sessionId: data.turn.sessionId }, `${data.session ? data.session.name : 'session'}-turn-${data.turn.number}-${turnLabel(data.turn)}`);
-  });
-  $('#turn-delete-btn').addEventListener('click', async () => {
-    const data = await getTurnWithJumps(S.overlayTurnId);
-    if (await confirmDialog('Delete this turn?', `Turn ${data.turn.number} (${turnLabel(data.turn)}, ${(data.jumps || []).length} jumps) will be permanently deleted.`)) {
-      await enqueue(() => deleteTurn(data.turn.id));
-      closeTurnOverlay(); toast('Turn deleted');
-      if (S.view === 'session') renderSession();
+  // Turn / set detail overlay
+  $('[data-close-turn]').addEventListener('click', closeOverlay);
+  $('#turn-overlay-actions').addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn || !S.overlay) return;
+    const { kind, id } = S.overlay;
+    const data = await getOverlayData(kind, id);
+    if (!data) return;
+    const { turn, session, set, list, isTurn } = data;
+    const where = session ? session.name : 'session';
+    switch (btn.dataset.act) {
+      case 'results': return openResults(kind, id);
+      case 'rename': {
+        const n = await nameDialog('Who was jumping?', turn.jumper || '', { chips: true });
+        if (n !== null) { await nameTurn(turn.id, n); renderOverlay(); }
+        break;
+      }
+      case 'split':
+        if (await confirmDialog('Start a new turn here?',
+          `Set ${set.number} and every set after it in this turn become a turn of their own, so you can put a different name on them. No jumps are lost.`, 'Split', false)) {
+          const newId = await enqueue(() => splitTurnAtSet(set.id));
+          if (newId) { S.overlay = { kind: 'turn', id: newId }; await renderOverlay(true); toast('Split into a new turn'); }
+          else closeOverlay();
+        }
+        break;
+      case 'merge':
+        if (await confirmDialog(`Merge into turn ${turn.number - 1}?`,
+          'This turn\u2019s sets are added to the end of the one above it, and that turn\u2019s name is kept. No jumps are lost.', 'Merge', false)) {
+          const target = await enqueue(() => mergeTurnIntoPrevious(turn.id));
+          if (target) { S.overlay = { kind: 'turn', id: target }; await renderOverlay(true); toast('Turns merged'); }
+          else closeOverlay();
+        }
+        break;
+      case 'csv':
+        await exportCsv(
+          isTurn ? { turnId: turn.id, sessionId: turn.sessionId } : { setId: set.id, turnId: turn.id, sessionId: turn.sessionId },
+          isTurn ? `${where}-turn-${turn.number}-${turnLabel(turn)}` : `${where}-turn-${turn.number}-set-${set.number}`);
+        break;
+      case 'delete': {
+        const what = isTurn
+          ? `Turn ${turn.number} (${turnLabel(turn)}, ${data.sets.length} set${data.sets.length === 1 ? '' : 's'}, ${list.length} jumps)`
+          : `Set ${set.number} of turn ${turn.number} (${list.length} jumps)`;
+        if (await confirmDialog(isTurn ? 'Delete this turn?' : 'Delete this set?', `${what} will be permanently deleted.`)) {
+          await enqueue(() => (isTurn ? deleteTurn(turn.id) : deleteSet(set.id)));
+          closeOverlay(); toast(isTurn ? 'Turn deleted' : 'Set deleted');
+          if (S.view === 'session') renderSession();
+        }
+        break;
+      }
     }
   });
 
@@ -1311,7 +1698,7 @@ function wireEvents() {
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || document.querySelector('dialog[open]')) return;
     if (!$('#results').hidden) closeResults();
-    else if (S.overlayTurnId != null) closeTurnOverlay();
+    else if (S.overlay) closeOverlay();
   });
 }
 
@@ -1340,8 +1727,8 @@ async function boot() {
   $$('[data-wordmark]').forEach((el) => { el.innerHTML = wordmarkHTML(); });
   $$('[data-device]').forEach((el) => { el.textContent = CONFIG.deviceLabel; });
 
-  liveChart = new JumpChart($('#live-chart'), { live: true, emptyText: `${LOGO_SVG.replace('wm-logo', 'empty-moon')}<strong>Every jump launches a bar</strong>Striped orange bed time at the bottom, blue air time on top.` });
-  overlayChart = new JumpChart($('#turn-overlay-chart'), { emptyText: '<strong>No jumps</strong>' });
+  liveChart = new JumpChart($('#live-chart'), { live: true, showSets: true, emptyText: `${LOGO_SVG.replace('wm-logo', 'empty-moon')}<strong>Every jump launches a bar</strong>Striped orange bed time at the bottom, blue air time on top.` });
+  overlayChart = new JumpChart($('#turn-overlay-chart'), { showSets: true, emptyText: '<strong>No jumps</strong>' });
   resultsChart = new JumpChart($('#rc-chart'), { fit: true });
   wireEvents();
 

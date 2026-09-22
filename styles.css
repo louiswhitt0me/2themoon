@@ -218,7 +218,18 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
 .connect-panel { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 4px 0 0; }
 
 .turn-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
+.turn-head-text { min-width: 0; }
 .turn-head-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.title-btn {
+  background: none; border: 0; padding: 0; margin: 0; color: inherit; font: inherit; text-align: left;
+  max-width: 100%; overflow-wrap: anywhere;
+}
+.title-btn:disabled { cursor: default; }
+.title-btn:not(:disabled) { text-decoration: underline; text-decoration-color: rgba(255,225,122,.45); text-underline-offset: 5px; }
+.title-btn.unnamed:not(:disabled) { color: var(--text-2); }
+/* "Next jumper" is the only thing that ends a turn, so it reads as an action. */
+.btn-swap { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; background: var(--card-2); border: 1px solid rgba(255,225,122,.55); color: var(--moon); }
+.btn-swap svg { width: 20px; height: 20px; flex: none; }
 .kicker {
   margin: 0 0 2px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   font: 700 15px/1.1 var(--display); letter-spacing: .08em; text-transform: uppercase; color: var(--text-2);
@@ -298,6 +309,10 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
 .tick { font: 700 14px var(--display); fill: var(--text-2); font-variant-numeric: tabular-nums; }
 .tick-unit { font: 800 13px var(--display); fill: var(--text-2); letter-spacing: .05em; }
 .xlab { font: 700 14px var(--display); fill: var(--text-2); text-anchor: middle; }
+/* Where one burst of jumping ends and the next begins, within one person's go. */
+.set-divider { stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 4 5; }
+.set-rule { stroke: rgba(176,192,255,.35); stroke-width: 1.5; }
+.set-lab { font: 800 12px var(--display); fill: var(--text-2); letter-spacing: .09em; text-anchor: middle; }
 .val { font: 800 14px var(--display); text-anchor: middle; font-variant-numeric: tabular-nums; }
 .val-total { fill: var(--text); font-size: 15px; }
 .val-total.val-sm { font-size: 12px; }
@@ -362,6 +377,22 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
 .turn-tof small { display: block; font: 700 12px/1.2 var(--display); letter-spacing: .07em; text-transform: uppercase; color: var(--text-2); }
 .spark { grid-column: 2 / 4; height: 22px; width: 100%; margin-top: 4px; }
 .spark rect { fill: var(--air); }
+/* A turn is a heading plus a row per set — the sets stay separate records. */
+.turn-list { gap: 16px; }
+.turn-group { display: flex; flex-direction: column; gap: 6px; }
+.set-list {
+  list-style: none; margin: 0 0 0 20px; padding: 0 0 0 14px;
+  display: flex; flex-direction: column; gap: 6px;
+  border-left: 2px solid var(--line);
+}
+.set-card { grid-template-columns: 1fr auto; min-height: 52px; padding: 9px 12px; background: rgba(20,28,72,.5); }
+.set-label { font: 800 17px/1.1 var(--display); letter-spacing: .04em; text-transform: uppercase; color: var(--text); }
+.set-card.open .set-label { color: var(--moon); }
+.set-tof { text-align: right; font: 800 19px/1 var(--display); font-variant-numeric: tabular-nums; color: var(--moon); }
+.set-tof small { font: 700 11px/1 var(--display); letter-spacing: .06em; text-transform: uppercase; color: var(--text-2); margin-left: 3px; }
+.set-meta { color: var(--text-2); font-size: 13px; font-weight: 600; }
+.set-card .spark { grid-column: 1 / 3; height: 16px; }
+.set-empty { margin: 0 0 0 34px; color: var(--text-2); font-weight: 600; font-size: 14px; }
 .session-card { grid-template-columns: 1fr auto; }
 .session-name { font: 800 22px/1.1 var(--display); text-transform: uppercase; overflow-wrap: anywhere; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .session-meta { color: var(--text-2); font-size: 14px; font-weight: 600; }
@@ -374,6 +405,20 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
 .empty strong { display: block; font: 800 24px/1.1 var(--display); text-transform: uppercase; color: var(--text); margin-bottom: 6px; }
 .section-label { font: 800 15px/1 var(--display); letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); margin: 8px 0 0; }
 .back-link { align-self: flex-start; }
+.day-label { font: 800 15px/1 var(--display); letter-spacing: .06em; text-transform: uppercase; color: var(--text-2); margin: 14px 0 0; }
+.group-head { display: flex; align-items: center; gap: 10px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.group-toggle {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; background: none; border: 0; padding: 0; color: var(--text);
+  font: 800 17px/1 var(--display); letter-spacing: .05em; text-transform: uppercase; text-align: left;
+}
+.group-caret { width: 18px; height: 18px; flex: none; color: var(--text-2); transition: transform .15s ease; }
+.group-toggle[aria-expanded="true"] .group-caret { transform: rotate(90deg); }
+.group-count {
+  flex: none; background: var(--card-2); border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px;
+  font: 800 14px/1.2 var(--display); color: var(--text-2);
+}
+.group-hint { margin: 8px 0 0; color: var(--text-2); font-weight: 600; font-size: 14px; }
+@media (prefers-reduced-motion: reduce) { .group-caret { transition: none; } }
 
 /* ---------- Bottom tab bar ---------- */
 .tabbar {

@@ -60,15 +60,15 @@ Open `app.js`. The first block is `CONFIG`:
 | `characteristicUUID` | Notify characteristic that carries the text lines | `6e400003-…` (TX) |
 | `commandCharacteristicUUID` | Write characteristic for commands (used for backfill) | `6e400002-…` (RX) |
 | `jumpType` | Line type for a jump | `J` |
-| `idleType` + `idleState` | A line of type `S` whose 4th field is `REST` ends the turn | `S` / `REST` |
+| `idleType` + `idleState` | A line of type `S` whose 4th field is `REST` ends the **set** | `S` / `REST` |
 | `barsVisible` | How many bars fit across a portrait phone before the chart scrolls sideways (bars are capped at 64 px wide, so bigger screens show more) | `12` |
-| `idleGraceMs` | Optional wait after idle before closing the turn (a jump in between cancels it) | `0` |
-| `turnGapMs` | Starts a new turn if two jumps are this far apart by the sensor clock (a missed idle) | `20000` |
+| `idleGraceMs` | Optional wait after idle before closing the set (a jump in between cancels it) | `0` |
+| `setGapMs` | Starts a new **set** if two jumps are this far apart by the sensor clock (a missed idle). Never starts a new turn | `20000` |
 | `newSessionAfterMs` | On connect, start a fresh session if the current one has been quiet this long | 3 hours |
 | `reconnectAttempts` | Automatic reconnect tries | `5` |
 | `backfillWindowMs` | After (re)connecting, ask the sensor to resend missed jumps if our last jump is this recent | 10 minutes |
 | `flagLabels` | Plain-English text shown next to raw flag values | from `detector.h` |
-| `dbName` / `dbVersion` | IndexedDB name and schema version | `trampoline-sensor-v1` / `1` |
+| `dbName` / `dbVersion` | IndexedDB name and schema version | `trampoline-sensor-v1` / `2` |
 
 UUIDs must be **lower-case** for Web Bluetooth.
 
@@ -82,7 +82,7 @@ UUIDs must be **lower-case** for Web Bluetooth.
 
 ## Demo mode
 
-Tap **Try demo** on the Live screen. It simulates the firmware's actual output (`J`, `S`, `C`, `X` and `#` lines, split into 20-byte chunks like a real BLE link, plus the odd corrupt line) and feeds it through the same `feedText()` → `parsePacket()` → storage → screen path as Bluetooth. You get turns of 10–30 jumps, then an idle, a pause, and the next jumper.
+Tap **Try demo** on the Live screen. It simulates the firmware's actual output (`J`, `S`, `C`, `X` and `#` lines, split into 20-byte chunks like a real BLE link, plus the odd corrupt line) and feeds it through the same `feedText()` → `parsePacket()` → storage → screen path as Bluetooth. The demo also plays the part of the person holding the phone: it does 2–4 sets of 8–22 jumps with a rest between them, then “taps” Next jumper and names whoever is on next.
 
 - A striped moon-yellow **DEMO MODE** banner and a yellow status pill show while it runs.
 - Demo jumps go into their own session named **"Demo · …"** with a **Demo** badge. They never mix with real data. **History → Delete all demo data** removes them.
@@ -91,10 +91,14 @@ Tap **Try demo** on the Live screen. It simulates the firmware's actual output (
 
 ## How it behaves
 
-- **Turns** start on the first jump and end on the sensor's idle signal (`S,…,REST`). A **Who was jumping?** panel then appears with recent names as one-tap chips. It doesn't block anything and can be skipped. Unnamed turns can be named later from the turn screen. **End turn** on the Live screen closes a turn by hand.
+- **Sets and turns.** Trampolining goes in bursts: you jump for a bit, rest, jump again, then swap. A **set** is one burst — it starts on the first jump and ends on the sensor's idle signal (`S,…,REST`). A **turn** is one person's whole go, holding every set they did.
+- **Only the "Next jumper" button ends a turn.** Nothing is ever split on a timer, so a long rest keeps you in the same turn. Tapping it closes the go and opens a **Who's up?** panel with recent names as one-tap chips (the person who just finished is left out). It doesn't block anything and can be skipped. The Live screen shows whoever is on; tap their name to set or change it.
+- **If someone forgets to tap it,** two people end up in one turn. Open any set from the Session screen and choose **Start a new turn here**: that set and every one after it split off. The reverse, **Merge into turn N**, is on the turn screen. Neither loses a jump.
+- **The Session screen** lists each turn with its combined numbers, and the sets inside it underneath. Tap a set for that burst on its own; tap the turn heading for the whole go, where the chart is divided set by set and the duration counts jumping time only, not the rests.
 - **Every jump is saved to IndexedDB as it arrives.** The app asks the browser once for persistent storage.
 - **Disconnects:** a banner appears, all data is kept, and the app retries 5 times with back-off. After that a **Reconnect** button shows. On reconnect the app sends the firmware's `b N` command, so jumps made while disconnected are resent (duplicates are ignored).
 - **Screen stays on** while connected or in demo (Screen Wake Lock), and the lock comes back when you return to the tab.
 - **Flags:** a non-zero `flags` value puts a small ▲ above that jump's bar. Tap the jump to see the raw value and its meaning.
-- **CSV:** from a turn, a session, or History (everything). On Android it opens the share sheet; elsewhere it downloads.
+- **History** shows today's sessions first; anything older is folded into **Previous sessions** (grouped by day, with a **Clear** button and the storage the app is using).
+- **CSV:** from a set, a turn, a session, or History (everything). Rows carry `turn_number`, `jumper_name` and `set_number`. On Android it opens the share sheet; elsewhere it downloads.
 - Tap the green **moonlander1 connected** pill to disconnect.
