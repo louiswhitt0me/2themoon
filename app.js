@@ -10,10 +10,14 @@ const CONFIG = {
   // CSV file names and results card all pick it up. A leading number is
   // drawn in moonlight yellow and a "the" is set small, e.g. 2·the·moon.
   brandName: '2themoon',
-  deviceLabel: 'moonlander1',   // the sensor's name as shown to people
+  deviceLabel: 'moonlander1',   // fallback name, shown until a sensor tells us its own
 
   // --- Bluetooth (firmware: config.h, Nordic UART Service layout) ---------
-  deviceNamePrefix: 'moonlander',                                // set BLE_NAME to "moonlander1" in config.h
+  // Every sensor advertises BLE_NAME_PREFIX "-" LABEL, e.g. "moonlander1-7C3A".
+  // The label defaults to the board's MAC tail and can be renamed from the app
+  // ("Tramp 1"), which is how a club tells one trampoline's sensor from another.
+  deviceNamePrefix: 'moonlander',                                // picker filter; firmware BLE_NAME_PREFIX starts with this
+  deviceLabelMax: 12,                                            // BLE_LABEL_MAX in config.h
   serviceUUID: '6e400001-b5a3-f393-e0a9-e50e24dcca9e',           // BLE_SVC_UUID (must be lower-case for Web Bluetooth)
   characteristicUUID: '6e400003-b5a3-f393-e0a9-e50e24dcca9e',    // BLE_TX_UUID  (notify: text lines)
   commandCharacteristicUUID: '6e400002-b5a3-f393-e0a9-e50e24dcca9e', // BLE_RX_UUID (write: commands, used for backfill)
@@ -22,6 +26,7 @@ const CONFIG = {
   jumpType: 'J',          // J,index,flightMs,contactMs,peakG,timestampMs,flags
   idleType: 'S',          // S,sampleIdx,fromState,toState  — a state change line...
   idleState: 'REST',      // ...whose toState is REST means "trampoline went quiet" = end of turn
+  deviceNameType: 'N',    // N,<name>  — the sensor reporting its own advertised BLE name
 
   // --- Chart ------------------------------------------------------------------
   barsVisible: 12,        // bars that fit across a portrait phone before it scrolls sideways
@@ -60,6 +65,7 @@ const CONFIG = {
    Returns one of:
      { kind: 'jump', type, index, flightMs, contactMs, peakG, timestamp, flags }
      { kind: 'idle', type }
+     { kind: 'name', type, name }   // the sensor's advertised BLE name
      { kind: 'ignore', type }       // valid line we don't use (C, X, E, R, #, other S)
      null                           // could not parse — caller logs and drops it
    ========================================================================== */
@@ -84,6 +90,11 @@ function parsePacket(line) {
   if (type === CONFIG.idleType) {
     if (f.length < 4) return null;
     return f[3] === CONFIG.idleState ? { kind: 'idle', type } : { kind: 'ignore', type };
+  }
+
+  if (type === CONFIG.deviceNameType) {
+    const name = (f[1] || '').slice(0, 40);
+    return name ? { kind: 'name', type, name } : null;
   }
 
   if (/^[A-Z]$/.test(type)) return { kind: 'ignore', type };   // other firmware line types
@@ -120,6 +131,17 @@ function wordmarkHTML() {
 
 function turnLabel(t) { return t.jumper || 'Unnamed turn'; }
 
+/* ---------- The sensor's own name ----------
+   Sensors are identical apart from this name, so it is what a club goes by.
+   The fixed prefix before the first "-" is the product name; the rest is the
+   editable label. Until a sensor introduces itself we fall back to CONFIG. */
+const deviceName = () => S.deviceName || CONFIG.deviceLabel;
+function splitDeviceName(name) {
+  const cut = name.indexOf('-');
+  return cut < 0 ? { prefix: '', label: name } : { prefix: name.slice(0, cut + 1), label: name.slice(cut + 1) };
+}
+function renderDeviceName() { $$('[data-device]').forEach((el) => { el.textContent = deviceName(); }); }
+
 function computeStats(jumps) {
   const n = jumps.length;
   let tof = 0, best = 0, bed = 0, peak = 0;
@@ -149,6 +171,61 @@ function statsHTML(jumps) {
    A session holds turns (one person's go), a turn holds sets (one burst of
    continuous jumping), and a set holds jumps.
    ========================================================================== */
+/** v1 kept one flat "turn" per burst of jumping. The model is now
+    session -> turn -> set -> jump, so every old turn becomes a turn holding a
+    single set with the same jumps in it. Nothing recorded under v1 is lost.
+    This runs inside the versionchange transaction, so it is all callbacks:
+    the transaction stays alive only while a request of its own is pending. */
+function migrateV1ToV2(db, tx) {
+  const sets = db.createObjectStore('sets', { keyPath: 'id', autoIncrement: true });
+  sets.createIndex('sessionId', 'sessionId');
+  sets.createIndex('turnId', 'turnId');
+  // Anything a half-finished v1 upgrade left out, so the app can always open.
+  if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
+  if (!db.objectStoreNames.contains('sessions')) {
+    db.createObjectStore('sessions', { keyPath: 'id', autoIncrement: true }).createIndex('createdAt', 'createdAt');
+  }
+  if (!db.objectStoreNames.contains('turns')) {
+    db.createObjectStore('turns', { keyPath: 'id', autoIncrement: true }).createIndex('sessionId', 'sessionId');
+  }
+  if (!db.objectStoreNames.contains('jumps')) {
+    const fresh = db.createObjectStore('jumps', { keyPath: 'id', autoIncrement: true });
+    fresh.createIndex('setId', 'setId');
+    fresh.createIndex('sessionId', 'sessionId');
+    return;                       // empty store: nothing to carry over
+  }
+  const jumps = tx.objectStore('jumps');
+  if (!jumps.indexNames.contains('sessionId')) jumps.createIndex('sessionId', 'sessionId');
+  if (!jumps.indexNames.contains('setId')) jumps.createIndex('setId', 'setId');
+  if (jumps.indexNames.contains('turnId')) jumps.deleteIndex('turnId');
+
+  // One set per old turn, remembering which set each turn's jumps belong to.
+  const setIdOfTurn = new Map();
+  tx.objectStore('turns').openCursor().onsuccess = (ev) => {
+    const cur = ev.target.result;
+    if (cur) {
+      const t = cur.value;
+      const add = sets.add({
+        sessionId: t.sessionId, turnId: t.id, number: 1,
+        startedAt: t.startedAt, endedAt: t.endedAt || null, demo: !!t.demo,
+      });
+      add.onsuccess = () => { setIdOfTurn.set(t.id, add.result); cur.continue(); };
+      return;
+    }
+    // Then point every jump at its new set. A jump whose turn is gone is dropped.
+    jumps.openCursor().onsuccess = (je) => {
+      const jc = je.target.result;
+      if (!jc) return;
+      const j = jc.value;
+      const setId = setIdOfTurn.get(j.turnId);
+      if (setId == null) { jc.delete(); jc.continue(); return; }
+      j.setId = setId;
+      delete j.turnId;
+      jc.update(j).onsuccess = () => jc.continue();
+    };
+  };
+}
+
 const DB = {
   db: null,
   open() {
@@ -156,12 +233,10 @@ const DB = {
       const req = indexedDB.open(CONFIG.dbName, CONFIG.dbVersion);
       req.onupgradeneeded = (e) => {
         const db = req.result;
+        const tx = req.transaction;   // the versionchange transaction: old data can be read and rewritten here
         // Migrations: add a new `if (e.oldVersion < N)` block for each schema version.
-        if (e.oldVersion < 2) {
-          // v1 kept one flat "turn" per burst of jumping. The model is now
-          // session -> turn -> set -> jump, so the old stores are dropped
-          // rather than migrated: nothing recorded under v1 is kept.
-          for (const name of Array.from(db.objectStoreNames)) db.deleteObjectStore(name);
+        if (e.oldVersion < 1) {
+          // Nothing on this device yet: create the stores as they are today.
           db.createObjectStore('sessions', { keyPath: 'id', autoIncrement: true }).createIndex('createdAt', 'createdAt');
           db.createObjectStore('turns', { keyPath: 'id', autoIncrement: true }).createIndex('sessionId', 'sessionId');
           const st = db.createObjectStore('sets', { keyPath: 'id', autoIncrement: true });
@@ -171,6 +246,8 @@ const DB = {
           j.createIndex('setId', 'setId');
           j.createIndex('sessionId', 'sessionId');
           db.createObjectStore('meta');
+        } else if (e.oldVersion < 2) {
+          migrateV1ToV2(db, tx);
         }
       };
       req.onsuccess = () => { this.db = req.result; resolve(); };
@@ -216,6 +293,7 @@ const S = {
   openTurn: null,         // the person who is up right now (ends on "Next jumper")
   openSet: null,          // the burst being jumped right now (ends when the trampoline is quiet)
   lastJump: null,         // most recent jump in the current session
+  deviceName: null,       // BLE name of the sensor we last talked to, e.g. "moonlander1-Tramp 1"
   seen: new Set(),        // "index:timestamp" keys, to drop duplicates after backfill
   jumpers: [],            // [{name, lastUsed}] remembered across sessions
   view: 'live',
@@ -593,6 +671,17 @@ function ingestLine(line) {
   if (!p) { console.warn('[sensor] ignored packet that failed to parse:', JSON.stringify(line)); return; }
   if (p.kind === 'jump') enqueue(() => handleJump(p));
   else if (p.kind === 'idle') enqueue(() => handleIdle());
+  else if (p.kind === 'name') handleDeviceName(p.name);
+}
+
+/** The sensor states its name on connect and after a rename. Demo names are
+    never remembered, so stopping the demo brings the real sensor's name back. */
+function handleDeviceName(name) {
+  if (S.deviceName === name) return;
+  S.deviceName = name;
+  if (!S.demo) DB.setMeta('lastDeviceName', name);
+  renderDeviceName();
+  renderConnection();
 }
 
 /* ==========================================================================
@@ -668,7 +757,7 @@ const BLE = {
     await enqueue(() => ensureSession({ demo: false }));
     this.setState('connected');
     Wake.enable();
-    DB.setMeta('lastDeviceName', this.device.name || null);
+    if (this.device.name) handleDeviceName(this.device.name);   // the sensor's N line confirms it
     await this.requestBackfill();
   },
 
@@ -681,6 +770,14 @@ const BLE = {
       await this.rx.writeValue(new TextEncoder().encode(`b ${last.index + 1}\n`));
       console.info('[ble] requested backfill from jump', last.index + 1);
     } catch (e) { console.info('[ble] backfill request failed', e.message); }
+  },
+
+  /** Rename the sensor. It saves the label in NVS, applies it without rebooting
+      (a reboot would reset the jump index a session is backfilling from) and
+      replies with an N line, which is what actually updates the app. */
+  async setLabel(label) {
+    if (!this.rx) throw new Error('this sensor has no command channel');
+    await this.rx.writeValue(new TextEncoder().encode(`n ${label}\n`));
   },
 
   onValue: (e) => {
@@ -703,7 +800,7 @@ const BLE = {
       try {
         await this.setup();
         this.reconnecting = false;
-        toast(`${CONFIG.deviceLabel} reconnected`);
+        toast(`${deviceName()} reconnected`);
         return;
       } catch (e) { console.info('[ble] reconnect attempt failed', e.message); }
     }
@@ -715,7 +812,7 @@ const BLE = {
     if (!this.device) return this.connect();
     this.userDisconnect = false;
     this.setState('connecting');
-    try { await this.setup(); toast(`${CONFIG.deviceLabel} reconnected`); }
+    try { await this.setup(); toast(`${deviceName()} reconnected`); }
     catch (e) { console.warn('[ble] manual reconnect failed', e); this.setState('lost', "Still can't reach the sensor. Check it's switched on, then try again."); }
   },
 
@@ -758,6 +855,7 @@ class DemoSensor {
   start() {
     this.running = true;
     this.emit(`# ble connected, ${CONFIG.deviceLabel}-demo`);
+    this.emit(`N,${CONFIG.deviceLabel}-demo`);
     this.emit('C,2500.00,0.0120,-0.0310,0.9990');
     this.loop();
   }
@@ -845,6 +943,8 @@ async function stopDemo({ restore = true } = {}) {
   await DB.setMeta('demoActive', false);
   await enqueue(() => closeTurn());
   closeNameSheet();
+  S.deviceName = (await DB.meta('lastDeviceName')) || null;   // drop the demo's name
+  renderDeviceName();
   if (restore) {
     const back = await DB.meta('lastRealSessionId');
     const exists = back != null && (await DB.get('sessions', back));
@@ -1098,7 +1198,7 @@ function renderConnection() {
   const el = $('#conn-status');
   let state = BLE.state, label;
   if (S.demo) { state = 'demo'; label = 'Demo running'; }
-  else label = { idle: 'Not connected', connecting: 'Connecting…', connected: `${CONFIG.deviceLabel} connected`, reconnecting: 'Reconnecting…', lost: 'Disconnected' }[state];
+  else label = { idle: 'Not connected', connecting: 'Connecting…', connected: `${deviceName()} connected`, reconnecting: 'Reconnecting…', lost: 'Disconnected' }[state];
   el.dataset.state = state;
   $('.conn-label', el).textContent = label;
 
@@ -1115,7 +1215,7 @@ function renderConnection() {
   const cbtn = $('#connect-btn');
   cbtn.disabled = !BLE.supported() || state === 'connecting';
   $('.btn-main', cbtn).textContent = state === 'connecting' ? 'Connecting…' : 'Connect sensor';
-  el.setAttribute('aria-label', connected ? `${label}. Tap to disconnect.` : label);
+  el.setAttribute('aria-label', connected ? `${label}. Tap for sensor settings.` : label);
 }
 
 function renderLive({ newJump = false } = {}) {
@@ -1481,6 +1581,44 @@ function confirmDialog(title, msg, okLabel = 'Delete', danger = okLabel === 'Del
   dlg.showModal();
   return new Promise((resolve) => dlg.addEventListener('close', () => resolve(dlg.returnValue === 'ok'), { once: true }));
 }
+/** Sensor settings: rename the connected sensor, or disconnect it. The name is
+    what tells one trampoline's sensor from the next in the Bluetooth picker, so
+    it is worth setting once per device at a club. */
+async function openSensorDialog() {
+  const dlg = $('#sensor-dlg');
+  const { prefix, label } = splitDeviceName(deviceName());
+  const input = $('#sensor-label-input');
+  const canRename = BLE.state === 'connected' && !!BLE.rx && !S.demo;
+
+  $('#sensor-prefix').textContent = prefix;
+  $('#sensor-prefix').hidden = !prefix;
+  input.maxLength = CONFIG.deviceLabelMax;
+  input.value = label;
+  input.disabled = !canRename;
+  $('#sensor-save').hidden = !canRename;
+  $('#sensor-sub').textContent = canRename
+    ? 'Name it after its trampoline, so it is easy to pick from the list.'
+    : S.demo ? 'This is the demo sensor — there is nothing to rename.'
+             : 'Connect the sensor to change its name.';
+
+  dlg.returnValue = '';
+  dlg.showModal();
+  if (canRename) input.select();
+  const ok = await new Promise((r) => dlg.addEventListener('close', () => r(dlg.returnValue === 'ok'), { once: true }));
+  if (!ok || !canRename) return;
+
+  // Match what the firmware will accept, so what they typed is what they get.
+  const wanted = input.value.replace(/[^\x20-\x7E]|,/g, '').trim().slice(0, CONFIG.deviceLabelMax).trim();
+  if (!wanted || wanted === label) return;
+  try {
+    await BLE.setLabel(wanted);
+    toast('Renaming the sensor…');
+  } catch (e) {
+    console.warn('[ble] rename failed', e);
+    toast("Couldn't rename the sensor — is it still connected?");
+  }
+}
+
 function nameDialog(title, initial, { chips = false } = {}) {
   const dlg = $('#rename-dlg');
   $('#rename-title').textContent = title;
@@ -1559,11 +1697,14 @@ function wireEvents() {
   $('#connect-btn').addEventListener('click', () => BLE.connect());
   $('#conn-status').addEventListener('click', async () => {
     if (S.demo) { if (await confirmDialog('Stop the demo?', 'Simulated jumps stop. The demo session stays in History until you delete it.', 'Stop demo')) stopDemo(); return; }
-    if (BLE.state === 'connected' || BLE.state === 'reconnecting') {
-      if (await confirmDialog('Disconnect the sensor?', 'Everything recorded so far is saved. You can connect again at any time.', 'Disconnect')) BLE.disconnect();
-    } else if (BLE.state === 'lost') BLE.manualReconnect();
+    if (BLE.state === 'connected' || BLE.state === 'reconnecting') return openSensorDialog();
+    if (BLE.state === 'lost') BLE.manualReconnect();
   });
   $('#reconnect-btn').addEventListener('click', () => BLE.manualReconnect());
+  $('#sensor-disconnect').addEventListener('click', async () => {
+    $('#sensor-dlg').close('cancel');
+    if (await confirmDialog('Disconnect the sensor?', 'Everything recorded so far is saved. You can connect again at any time.', 'Disconnect')) BLE.disconnect();
+  });
   $('#demo-btn').addEventListener('click', () => startDemo());
   $('#demo-stop').addEventListener('click', () => stopDemo());
   $('#next-jumper-btn').addEventListener('click', () => nextJumper());
@@ -1725,7 +1866,7 @@ async function checkSupport() {
 async function boot() {
   document.title = CONFIG.brandName;
   $$('[data-wordmark]').forEach((el) => { el.innerHTML = wordmarkHTML(); });
-  $$('[data-device]').forEach((el) => { el.textContent = CONFIG.deviceLabel; });
+  renderDeviceName();
 
   liveChart = new JumpChart($('#live-chart'), { live: true, showSets: true, emptyText: `${LOGO_SVG.replace('wm-logo', 'empty-moon')}<strong>Every jump launches a bar</strong>Striped orange bed time at the bottom, blue air time on top.` });
   overlayChart = new JumpChart($('#turn-overlay-chart'), { showSets: true, emptyText: '<strong>No jumps</strong>' });
@@ -1745,10 +1886,16 @@ async function boot() {
     await DB.setMeta('persistAsked', true);
   }
   S.jumpers = (await DB.meta('jumpers')) || [];
+  S.deviceName = (await DB.meta('lastDeviceName')) || null;
+  renderDeviceName();
   await loadCurrentSession(await DB.meta('currentSessionId'));
   await checkSupport();
   renderConnection();
   renderLive({});
+  // The app is up and storing jumps. index.html watches this: if it is still
+  // unset after a few seconds the page reloads past the cache, which rescues a
+  // browser left holding one new file and one old one after an upload.
+  window.__booted = true;
 
   // Reload-safe demo: carry on simulating into the same demo session.
   if (await DB.meta('demoActive')) await startDemo({ resume: true });
@@ -1758,11 +1905,16 @@ async function boot() {
   if (BLE.supported() && navigator.bluetooth.getDevices && !S.demo) {
     try {
       const devices = await navigator.bluetooth.getDevices();
-      const d = devices.find((x) => (x.name || '').startsWith(CONFIG.deviceNamePrefix));
+      const known = devices.filter((x) => (x.name || '').startsWith(CONFIG.deviceNamePrefix));
+      // With a sensor on every trampoline, only offer one we can name with
+      // confidence: the one we were last on, or the only one there is.
+      const d = known.find((x) => x.name === S.deviceName) || (known.length === 1 ? known[0] : null);
       if (d) {
         BLE.device = d;
         d.addEventListener('gattserverdisconnected', BLE.onDisconnected);
         BLE.setState('lost', `Tap Reconnect to pick up where you left off with ${d.name}.`, true);
+      } else if (known.length > 1) {
+        console.info('[ble] several sensors permitted; waiting for the user to choose one');
       }
     } catch (e) { console.info('[ble] getDevices unavailable', e.message); }
   }

@@ -35,6 +35,8 @@ Works in **Chrome on Android** and **Chrome / Edge on Windows, Mac and ChromeOS*
 
 Cloudflare Pages and Netlify work too: point them at the repo, with no build command and the output directory set to the root.
 
+**After an upload, refresh properly.** GitHub Pages serves every file with a ten-minute cache, so a browser can pick up the new `app.js` next to the old `index.html`. The two no longer fit: `boot()` throws on an element that isn't there any more, the sensor still connects (that listener is wired first) but nothing is saved or drawn. Hard-refresh after uploading — `Cmd/Ctrl+Shift+R`, or Site settings -> Clear & reset on Android, and clear the home-screen app's storage too. The page guards against this itself: `app.js` sets `window.__booted` once it is up, and the small script at the bottom of `index.html` refetches the files past the cache and reloads if that flag is missing after five seconds. It only ever does this once per tab, so a genuine fault can't turn into a reload loop.
+
 ## Run it locally for testing
 
 Web Bluetooth only works on `https://` or on `localhost`, so serve the folder rather than double-clicking `index.html`:
@@ -78,7 +80,7 @@ UUIDs must be **lower-case** for Web Bluetooth.
 
 **Packet format:** everything about the wire format is in **`parsePacket(line)`**, right under `CONFIG`. It gets one text line and returns `{kind:'jump', …}`, `{kind:'idle'}`, `{kind:'ignore'}` or `null` (bad line: logged to the console and dropped). Bluetooth notifications are treated as a byte stream and split into lines on `\n` before `parsePacket` sees them, which matches `link.h` (lines can be split across notifications). If you switch to a binary format, change `BLE.onValue` to pass whole packets straight through and rewrite `parsePacket`.
 
-**Schema changes:** bump `dbVersion` and add an `if (e.oldVersion < 2) { … }` block in `DB.open()`.
+**Schema changes:** bump `dbVersion` and add an `else if (e.oldVersion < N) { … }` branch in `DB.open()`, which carries the data already on the device across rather than dropping it. The v1 → v2 step is `migrateV1ToV2()`: v1 kept one flat "turn" per burst, so each old turn becomes a turn holding a single set with the same jumps, and sessions, names and settings are kept. It all runs inside the versionchange transaction, so it is written as callbacks — an `await` there would let the transaction commit halfway through.
 
 ## Demo mode
 

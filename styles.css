@@ -557,6 +557,12 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
 .dlg p { margin: 0 0 16px; color: var(--text-2); }
 .dlg input { width: 100%; margin-bottom: 16px; }
 .dlg-actions { display: flex; justify-content: flex-end; gap: 10px; }
+/* Sensor rename: fixed product prefix, then the editable per-trampoline label. */
+.name-split { display: flex; align-items: center; gap: 2px; margin-bottom: 16px; }
+.name-prefix { flex: none; color: var(--text-2); font-weight: 700; font-size: 16px; }
+.name-split input { margin-bottom: 0; }
+.dlg .dlg-hint { margin: -6px 0 16px; font-size: 13px; }
+#sensor-disconnect { display: block; margin: 14px auto 0; }
 .toast {
   position: fixed; left: 16px; right: 16px; margin: 0 auto; width: fit-content; z-index: 60;
   top: calc(var(--topbar-h) + 10px + env(safe-area-inset-top));

@@ -181,6 +181,45 @@
     </form>
   </dialog>
 
+  <!-- Sensor settings: rename this trampoline's sensor, or disconnect it. -->
+  <dialog id="sensor-dlg" class="dlg" aria-labelledby="sensor-title">
+    <form method="dialog" id="sensor-form" autocomplete="off">
+      <h2 id="sensor-title">Sensor</h2>
+      <p id="sensor-sub"></p>
+      <label class="sr-only" for="sensor-label-input">Sensor name</label>
+      <div class="name-split">
+        <span id="sensor-prefix" class="name-prefix">moonlander1-</span>
+        <input id="sensor-label-input" type="text" maxlength="12" placeholder="Tramp 1" enterkeyhint="done">
+      </div>
+      <p class="dlg-hint">The name shows in the Bluetooth list, so give each trampoline&rsquo;s sensor its own.</p>
+      <div class="dlg-actions">
+        <button type="button" value="cancel" class="btn-outline" data-dlg-cancel>Close</button>
+        <button value="ok" id="sensor-save" class="btn-primary">Save name</button>
+      </div>
+      <button type="button" id="sensor-disconnect" class="btn-link">Disconnect sensor</button>
+    </form>
+  </dialog>
+
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <!-- ============ Self-heal a half-cached update ============
+       GitHub Pages serves every file with a 10-minute cache, so a browser can
+       end up with a new app.js and an old index.html (or the other way round).
+       The two no longer fit, boot() throws, and the app looks alive but records
+       nothing. If boot hasn't finished in a few seconds, fetch the files past
+       the cache and reload — once per tab, so a real fault can't loop. -->
+  <script>
+    setTimeout(function () {
+      if (window.__booted) return;
+      try {
+        if (sessionStorage.getItem('2themoon-cache-bust')) return;
+        sessionStorage.setItem('2themoon-cache-bust', '1');
+      } catch (e) { /* private mode: reload once anyway */ }
+      console.warn('[boot] app did not start — refetching past the cache');
+      var files = ['index.html', 'app.js', 'styles.css'];
+      Promise.all(files.map(function (f) {
+        return fetch(f, { cache: 'reload' }).catch(function () {});
+      })).then(function () { location.reload(); });
+    }, 5000);
+  </script>
 </body>
 </html>
