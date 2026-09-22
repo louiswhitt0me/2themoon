@@ -635,6 +635,14 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
   background: var(--card-2); border-radius: 4px; padding: 1px 4px; font-size: 12px;
 }
 .btn-small[aria-pressed="true"] { background: var(--moon); color: var(--on-light); }
+/* Tap feedback on the debug screen: an instant change while pressed, then a
+   short flash (added by debug.js) so it is still visible after a quick tap. */
+#view-debug .btn-small:active { background: var(--moon); color: var(--on-light); }
+#view-debug .btn-small.tapped { animation: dbg-tap .45s ease-out; }
+@keyframes dbg-tap {
+  0%, 35% { background: var(--moon); color: var(--on-light); box-shadow: 0 0 16px var(--moon-glow); }
+  100% { box-shadow: none; }
+}
 
 /* ---- Scope ---- */
 #scope {

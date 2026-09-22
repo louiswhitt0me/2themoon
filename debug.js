@@ -705,6 +705,24 @@ const Debug = {
     if (!view) return;
 
     view.addEventListener('click', async (e) => {
+      // Flash whatever was tapped, so a press that sends nothing visible (Stop,
+      // Trigger between jumps) still shows it registered.
+      const tapped = e.target.closest('button');
+      if (tapped) {
+        tapped.classList.remove('tapped');
+        void tapped.offsetWidth;   // restart the flash on a quick second tap
+        tapped.classList.add('tapped');
+        clearTimeout(tapped._tapTimer);
+        tapped._tapTimer = setTimeout(() => tapped.classList.remove('tapped'), 450);
+      }
+
+      // The saved-capture buttons are drawn by renderCaptures() and carry their
+      // own attributes rather than data-dbg, so handle them first.
+      const csv = e.target.closest('[data-cap-csv]');
+      if (csv) { this.exportCapture(Number(csv.dataset.capCsv)); return; }
+      const del = e.target.closest('[data-cap-del]');
+      if (del) { await DB.del('captures', Number(del.dataset.capDel)); this.renderCaptures(); return; }
+
       const btn = e.target.closest('[data-dbg]');
       if (!btn) return;
       switch (btn.dataset.dbg) {
@@ -732,10 +750,6 @@ const Debug = {
         case 'save':     this.save(); break;
         case 'off':      this.setEnabled(false); break;
       }
-      const csv = e.target.closest('[data-cap-csv]');
-      if (csv) this.exportCapture(Number(csv.dataset.capCsv));
-      const del = e.target.closest('[data-cap-del]');
-      if (del) { await DB.del('captures', Number(del.dataset.capDel)); this.renderCaptures(); }
     });
 
     // Tuning: commit on Enter or on leaving the field, and always re-read the
