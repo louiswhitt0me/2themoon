@@ -160,7 +160,11 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const secs = (ms) => (ms / 1000).toFixed(2);
+/* Every time on every screen goes through here, so the precision toggle on
+   the Live screen only has to change one number. */
+const PRECISIONS = [1, 2, 3];
+const DEFAULT_PRECISION = 2;
+const secs = (ms) => (ms / 1000).toFixed(S.precision);
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 const fmtTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 const fmtDate = (iso) => new Date(iso).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
@@ -360,6 +364,7 @@ const S = {
   nameSheet: null,        // { mode: 'next' | 'current', summary } while the name sheet is up
   overlay: null,          // { kind: 'turn' | 'set', id } while the detail screen is up
   historyOpen: false,     // is the "Previous sessions" group expanded?
+  precision: DEFAULT_PRECISION,   // decimals on every time shown, 1-3 (kept in meta)
   demo: null,
 };
 let idleTimer = null;
@@ -1189,6 +1194,10 @@ class JumpChart {
       <rect width="3" height="7" fill="rgba(255,255,255,.45)"/></pattern></defs>${grid}`;
     const base = y(0);
     const labelEvery = this.fit ? Math.ceil(26 / groupW) : 1;
+    // An extra decimal is about one character wider, so bars need a little more
+    // room before a value fits above them, or inside a segment.
+    const extra = (S.precision - DEFAULT_PRECISION) * 6;
+    const smallAt = 34 + extra, insideAt = 30 + extra;
     for (let i = 0; i < n; i++) {
       const j = this.jumps[i];
       const gx = xs[i] + (this.fit ? 3 : 8);
@@ -1214,9 +1223,9 @@ class JumpChart {
           <rect class="bar-bed-hatch" x="${x0.toFixed(1)}" y="${yBed.toFixed(1)}" width="${w}" height="${bedH.toFixed(1)}" fill="url(#${hatch})"/>
           ${barW >= 6 ? `<line class="bar-split" x1="${x0.toFixed(1)}" x2="${(x0 + barW).toFixed(1)}" y1="${yBed.toFixed(1)}" y2="${yBed.toFixed(1)}"/>` : ''}
         </g>
-        ${labels ? `<text class="val val-total${groupW < 34 ? ' val-sm' : ''}" x="${cx}" y="${(yTop - 6).toFixed(1)}">${secs(totalMs)}</text>
-        ${barW >= 30 && airH >= 22 ? `<text class="val val-in-air" x="${cx}" y="${(yBed - 7).toFixed(1)}">${secs(j.flightMs)}</text>` : ''}
-        ${barW >= 30 && bedH >= 20 ? `<text class="val val-in-bed" x="${cx}" y="${(base - 6).toFixed(1)}">${secs(j.contactMs)}</text>` : ''}` : ''}
+        ${labels ? `<text class="val val-total${groupW < smallAt ? ' val-sm' : ''}" x="${cx}" y="${(yTop - 6).toFixed(1)}">${secs(totalMs)}</text>
+        ${barW >= insideAt && airH >= 22 ? `<text class="val val-in-air" x="${cx}" y="${(yBed - 7).toFixed(1)}">${secs(j.flightMs)}</text>` : ''}
+        ${barW >= insideAt && bedH >= 20 ? `<text class="val val-in-bed" x="${cx}" y="${(base - 6).toFixed(1)}">${secs(j.contactMs)}</text>` : ''}` : ''}
         ${i % labelEvery === 0 || i === n - 1 ? `<text class="xlab" x="${(gx + groupW / 2).toFixed(1)}" y="${(base + 20).toFixed(1)}">${i + 1}</text>` : ''}
         ${j.flags ? `<path class="flag-mark" d="M${(gx + groupW / 2).toFixed(1)} ${(top - 16).toFixed(1)} l4 7 h-8 z"><title>Flags ${j.flags}${ft ? ': ' + esc(ft) : ''}</title></path>` : ''}
       </g>`;
@@ -1278,6 +1287,20 @@ function renderConnection() {
   cbtn.disabled = !BLE.supported() || state === 'connecting';
   $('.btn-main', cbtn).textContent = state === 'connecting' ? 'Connecting…' : 'Connect sensor';
   el.setAttribute('aria-label', connected ? `${label}. Tap for sensor settings.` : label);
+}
+
+/* ---------- Time precision (1, 2 or 3 decimals) ----------
+   The toggle sits on the Live screen but the choice is global: stats, lists,
+   chart labels, the detail overlay and the results card all read it. */
+function renderPrecision() {
+  $$('#precision-seg .seg-btn').forEach((b) => b.setAttribute('aria-pressed', String(Number(b.dataset.dp) === S.precision)));
+}
+async function setPrecision(dp) {
+  if (!PRECISIONS.includes(dp) || dp === S.precision) return;
+  S.precision = dp;
+  renderPrecision();
+  renderAfterData();
+  try { await DB.setMeta('precision', dp); } catch (e) { console.info('[app] could not save precision', e); }
 }
 
 function renderLive({ newJump = false } = {}) {
@@ -1777,6 +1800,7 @@ function wireEvents() {
   });
 
   $$('.tab').forEach((t) => t.addEventListener('click', () => showView(t.dataset.tab)));
+  $('#precision-seg').addEventListener('click', (e) => { const b = e.target.closest('.seg-btn'); if (b) setPrecision(Number(b.dataset.dp)); });
 
   // Five taps on the wordmark shows or hides the debug tools, for a phone at a
   // trampoline where typing ?debug=1 into the address bar is no fun.
@@ -1955,6 +1979,9 @@ async function boot() {
     await DB.setMeta('persistAsked', true);
   }
   S.jumpers = (await DB.meta('jumpers')) || [];
+  const savedDp = await DB.meta('precision');
+  if (PRECISIONS.includes(savedDp)) S.precision = savedDp;
+  renderPrecision();
   S.deviceName = (await DB.meta('lastDeviceName')) || null;
   renderDeviceName();
   await loadCurrentSession(await DB.meta('currentSessionId'));

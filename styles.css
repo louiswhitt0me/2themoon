@@ -227,6 +227,16 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
 .title-btn:disabled { cursor: default; }
 .title-btn:not(:disabled) { text-decoration: underline; text-decoration-color: rgba(255,225,122,.45); text-underline-offset: 5px; }
 .title-btn.unnamed:not(:disabled) { color: var(--text-2); }
+/* Segmented control. Used for the time-precision toggle: one pill, the chosen
+   option filled with moonlight so it reads at a glance from the trampoline. */
+.seg { display: inline-flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--card-2); border: 1px solid var(--line); }
+.seg-btn {
+  min-height: 34px; padding: 0 12px; border: 0; border-radius: 999px;
+  background: none; color: var(--text-2);
+  font: 800 16px/1 var(--display); letter-spacing: .05em; text-transform: uppercase;
+}
+.seg-btn[aria-pressed="true"] { background: var(--moon); color: var(--on-light); }
+
 /* "Next jumper" is the only thing that ends a turn, so it reads as an action. */
 .btn-swap { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; background: var(--card-2); border: 1px solid rgba(255,225,122,.55); color: var(--moon); }
 .btn-swap svg { width: 20px; height: 20px; flex: none; }
