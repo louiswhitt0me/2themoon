@@ -27,6 +27,15 @@ const CONFIG = {
   idleType: 'S',          // S,sampleIdx,fromState,toState  — a state change line...
   idleState: 'REST',      // ...whose toState is REST means "trampoline went quiet" = end of turn
   deviceNameType: 'N',    // N,<name>  — the sensor reporting its own advertised BLE name
+  batteryType: 'B',       // B,batMv,usb,charging — every 30 s, on any change, and on "p"
+
+  // --- Battery (firmware: config.h). A single-cell LiPo read through a divider. --
+  batteryLowMv: 3550,     // BAT_LOW_MV: the sensor's LED starts its low-battery blink here
+  // Resting LiPo voltage -> charge left, interpolated between points. Rough by
+  // nature (the curve is flat in the middle and sags under load), so the app
+  // rounds to 5 %. 0 % is BAT_CRIT_MV, where the sensor puts itself to sleep.
+  batteryCurve: [[3400, 0], [3500, 5], [3600, 12], [3700, 30], [3750, 40], [3800, 50],
+                 [3900, 65], [4000, 80], [4100, 90], [4180, 100]],
 
   // --- Chart ------------------------------------------------------------------
   barsVisible: 12,        // bars that fit across a portrait phone before it scrolls sideways
@@ -81,6 +90,7 @@ const CONFIG = {
      { kind: 'jump', type, index, flightMs, contactMs, peakG, timestamp, flags }
      { kind: 'idle', type }
      { kind: 'name', type, name }   // the sensor's advertised BLE name
+     { kind: 'battery', type, mv, usb, charging }   // mv 0 = no reading
      { kind: 'ignore', type }       // valid line we don't use (C, X, E, R, #, other S)
      null                           // could not parse — caller logs and drops it
    ========================================================================== */
@@ -114,6 +124,13 @@ function parsePacket(line) {
   if (type === CONFIG.deviceNameType) {
     const name = (f[1] || '').slice(0, 40);
     return name ? { kind: 'name', type, name } : null;
+  }
+
+  if (type === CONFIG.batteryType) {
+    if (f.length < 4) return null;
+    const mv = Number(f[1]);
+    if (f[1] === '' || !Number.isFinite(mv) || mv < 0 || mv > 6000) return null;
+    return { kind: 'battery', type, mv, usb: f[2] === '1', charging: f[3] === '1' };
   }
 
   // --- Debug / tuning lines. None of these touch the recording pipeline:
@@ -357,6 +374,7 @@ const S = {
   openSet: null,          // the burst being jumped right now (ends when the trampoline is quiet)
   lastJump: null,         // most recent jump in the current session
   deviceName: null,       // BLE name of the sensor we last talked to, e.g. "moonlander1-Tramp 1"
+  battery: null,          // last B line from the connected sensor: {mv, usb, charging}
   seen: new Set(),        // "index:timestamp" keys, to drop duplicates after backfill
   jumpers: [],            // [{name, lastUsed}] remembered across sessions
   view: 'live',
@@ -739,6 +757,42 @@ function ingestLine(line) {
   if (p.kind === 'jump') enqueue(() => handleJump(p));
   else if (p.kind === 'idle') enqueue(() => handleIdle());
   else if (p.kind === 'name') handleDeviceName(p.name);
+  else if (p.kind === 'battery') handleBattery(p);
+}
+
+/* ---------- Battery ----------
+   Only the live reading is kept: it means nothing once the sensor is gone. */
+function handleBattery({ mv, usb, charging }) {
+  const wasLow = batteryInfo(S.battery)?.level === 'low';
+  S.battery = { mv, usb, charging };
+  if (batteryInfo(S.battery)?.level === 'low' && !wasLow) toast(`${deviceName()} battery is low. Charge it after this session.`);
+  renderConnection();
+}
+
+/** Charge left from a resting voltage, to the nearest 5 %. */
+function batteryPercent(mv) {
+  const c = CONFIG.batteryCurve;
+  if (mv <= c[0][0]) return 0;
+  if (mv >= c[c.length - 1][0]) return 100;
+  let i = 1;
+  while (mv > c[i][0]) i++;
+  const [v0, p0] = c[i - 1], [v1, p1] = c[i];
+  return Math.round((p0 + (p1 - p0) * (mv - v0) / (v1 - v0)) / 5) * 5;
+}
+
+/** What to show for a B reading, or null when there is nothing to show (no
+    reading yet, or a board without battery sensing, which sends 0,0,0). */
+function batteryInfo(b) {
+  if (!b || (!b.mv && !b.usb)) return null;
+  const volts = b.mv ? `${(b.mv / 1000).toFixed(2)} V` : '';
+  if (!b.mv) return { level: 'usb', pct: null, text: 'USB', detail: 'Running on USB power (battery switch is off)' };
+  const pct = batteryPercent(b.mv);
+  // The charger holds the cell above its resting voltage, so this percentage
+  // reads high until charging stops; the bolt on the icon says why.
+  if (b.charging) return { level: 'charging', pct, text: `${pct}%`, detail: `Charging · ${volts}` };
+  if (b.usb) return { level: 'full', pct: 100, text: 'Full', detail: `Charged, on USB power · ${volts}` };
+  const level = b.mv < CONFIG.batteryLowMv ? 'low' : 'ok';
+  return { level, pct, text: `${pct}%`, detail: `${level === 'low' ? 'Low · ' : ''}${pct}% · ${volts}` };
 }
 
 /** The sensor states its name on connect and after a rename. Demo names are
@@ -819,6 +873,7 @@ const BLE = {
     this.tx = tx; this.rx = rx;
     this.decoder = new TextDecoder();
     resetLineBuffer();
+    S.battery = null;
     tx.addEventListener('characteristicvaluechanged', this.onValue);
     await tx.startNotifications();
     await enqueue(() => ensureSession({ demo: false }));
@@ -826,6 +881,15 @@ const BLE = {
     Wake.enable();
     if (this.device.name) handleDeviceName(this.device.name);   // the sensor's N line confirms it
     await this.requestBackfill();
+    await this.requestPower();
+  },
+
+  /** The sensor only reports power every 30 s or on a change, so ask now
+      rather than showing no battery for the first half-minute. */
+  async requestPower() {
+    if (!this.rx) return;
+    try { await this.rx.writeValue(new TextEncoder().encode('p\n')); }
+    catch (e) { console.info('[ble] power request failed', e.message); }
   },
 
   /** Ask the sensor to resend jumps we may have missed while disconnected. */
@@ -924,9 +988,15 @@ class DemoSensor {
     this.emit(`# ble connected, ${CONFIG.deviceLabel}-demo`);
     this.emit(`N,${CONFIG.deviceLabel}-demo`);
     this.emit('C,2500.00,0.0120,-0.0310,0.9990');
+    this.batteryMv = Math.round(this.rand(3780, 4050));
+    this.emit(`B,${this.batteryMv},0,0`);
+    this.batteryTimer = setInterval(() => {   // drains a little every 30 s, like the real report
+      this.batteryMv = Math.max(3450, this.batteryMv - Math.round(this.rand(2, 8)));
+      this.emit(`B,${this.batteryMv},0,0`);
+    }, 30000 / this.speed);
     this.loop();
   }
-  stop() { this.running = false; clearTimeout(this.timer); }
+  stop() { this.running = false; clearTimeout(this.timer); clearInterval(this.batteryTimer); }
   /* One person's go is several bursts with a breather between them; the loop
      also plays the part of whoever taps "Next jumper" when they swap over. */
   async loop() {
@@ -1006,6 +1076,7 @@ async function stopDemo({ restore = true } = {}) {
   if (!S.demo) return;
   S.demo.stop();
   S.demo = null;
+  S.battery = null;
   Wake.disable();
   await DB.setMeta('demoActive', false);
   await enqueue(() => closeTurn());
@@ -1267,11 +1338,27 @@ function renderAfterData({ newJump = false } = {}) {
 
 function renderConnection() {
   const el = $('#conn-status');
-  let state = BLE.state, label;
-  if (S.demo) { state = 'demo'; label = 'Demo running'; }
-  else label = { idle: 'Not connected', connecting: 'Connecting…', connected: `${deviceName()} connected`, reconnecting: 'Reconnecting…', lost: 'Disconnected' }[state];
+  const state = S.demo ? 'demo' : BLE.state;
+  // Battery sits inside the pill, and only while a sensor is actually talking.
+  const bat = batteryInfo(state === 'connected' || state === 'demo' ? S.battery : null);
+  // With a battery showing, the green dot and the battery already say
+  // "connected", and every sensor shares the prefix, so the pill keeps just the
+  // label ("Tramp 1") and a phone still has room for it.
+  const label = S.demo ? 'Demo running'
+    : { idle: 'Not connected', connecting: 'Connecting…', connected: bat ? splitDeviceName(deviceName()).label : `${deviceName()} connected`, reconnecting: 'Reconnecting…', lost: 'Disconnected' }[state];
   el.dataset.state = state;
   $('.conn-label', el).textContent = label;
+
+  const batEl = $('.conn-bat', el);
+  batEl.hidden = !bat;
+  if (bat) {
+    batEl.dataset.level = bat.level;
+    // The fill is 16 units wide at 100 %; keep a sliver so empty still reads as a battery.
+    $('.bat-fill', batEl).setAttribute('width', bat.pct == null ? 0 : Math.max(1.5, bat.pct * 0.16).toFixed(1));
+    $('.conn-bat-text', batEl).textContent = bat.text;
+  }
+  $('#sensor-battery').textContent = bat ? `Battery: ${bat.detail}` : '';
+  $('#sensor-battery').hidden = !bat;
 
   $('#demo-banner').hidden = !S.demo;
   const banner = $('#conn-banner');
@@ -1286,7 +1373,9 @@ function renderConnection() {
   const cbtn = $('#connect-btn');
   cbtn.disabled = !BLE.supported() || state === 'connecting';
   $('.btn-main', cbtn).textContent = state === 'connecting' ? 'Connecting…' : 'Connect sensor';
-  el.setAttribute('aria-label', connected ? `${label}. Tap for sensor settings.` : label);
+  const batLabel = bat ? ` Battery ${bat.detail}.` : '';
+  const spoken = state === 'connected' ? `${deviceName()} connected` : label;
+  el.setAttribute('aria-label', connected ? `${spoken}.${batLabel} Tap for sensor settings.` : `${spoken}.${batLabel}`);
 }
 
 /* ---------- Time precision (1, 2 or 3 decimals) ----------

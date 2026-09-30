@@ -25,6 +25,10 @@
     <span class="wordmark" data-wordmark></span>
     <button type="button" id="conn-status" class="conn" data-state="idle" aria-live="polite" title="Connection">
       <span class="conn-dot" aria-hidden="true"></span><span class="conn-label">Not connected</span>
+      <span class="conn-bat" data-level="ok" hidden aria-hidden="true">
+        <svg class="bat-icon" viewBox="0 0 24 12"><rect class="bat-body" x="0.75" y="0.75" width="19.5" height="10.5" rx="2.5"/><rect class="bat-cap" x="21" y="3.5" width="2.25" height="5" rx="1"/><rect class="bat-fill" x="2.5" y="2.5" width="16" height="7" rx="1.2"/><path class="bat-bolt" d="M11.6 1.6 7.4 6.6h3.1l-1.3 3.8 4.4-5.1h-3.1z"/></svg>
+        <span class="conn-bat-text"></span>
+      </span>
     </button>
   </header>
 
@@ -290,6 +294,7 @@
     <form method="dialog" id="sensor-form" autocomplete="off">
       <h2 id="sensor-title">Sensor</h2>
       <p id="sensor-sub"></p>
+      <p id="sensor-battery" class="sensor-battery" hidden></p>
       <label class="sr-only" for="sensor-label-input">Sensor name</label>
       <div class="name-split">
         <span id="sensor-prefix" class="name-prefix">moonlander1-</span>
