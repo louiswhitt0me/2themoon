@@ -10,12 +10,12 @@
   <title>2themoon</title>
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="styles.css">
-  <script src="app.js" defer></script>
+  <link rel="stylesheet" href="styles.css?v=20261005">
+  <script src="app.js?v=20261005" defer></script>
   <!-- Debug tools: the scope, the serial monitor and the tuning panel. Loaded
        after app.js (defer keeps the order) and optional — app.js guards every
        call into it, so a failure here never stops jumps being recorded. -->
-  <script src="debug.js" defer></script>
+  <script src="debug.js?v=20261005" defer></script>
 </head>
 <body>
   <div class="sky" aria-hidden="true"><div class="twinkle"></div><div class="moon"></div><div class="horizon"></div></div>
@@ -317,7 +317,10 @@
        end up with a new app.js and an old index.html (or the other way round).
        The two no longer fit, boot() throws, and the app looks alive but records
        nothing. If boot hasn't finished in a few seconds, fetch the files past
-       the cache and reload — once per tab, so a real fault can't loop. -->
+       the cache and reload — once per tab, so a real fault can't loop.
+       The ?v= on the stylesheet and scripts above is the first line of
+       defence: bump it on every upload that changes them, and a new
+       index.html can never be paired with a cached old file. -->
   <script>
     setTimeout(function () {
       if (window.__booted) return;
@@ -326,7 +329,12 @@
         sessionStorage.setItem('2themoon-cache-bust', '1');
       } catch (e) { /* private mode: reload once anyway */ }
       console.warn('[boot] app did not start — refetching past the cache');
-      var files = ['index.html', 'app.js', 'debug.js', 'styles.css'];
+      // The exact (versioned) URLs this page asked for, so it is those
+      // cache entries that get replaced.
+      var files = ['index.html'];
+      document.querySelectorAll('script[src], link[rel="stylesheet"]').forEach(function (el) {
+        files.push(el.getAttribute('src') || el.getAttribute('href'));
+      });
       Promise.all(files.map(function (f) {
         return fetch(f, { cache: 'reload' }).catch(function () {});
       })).then(function () { location.reload(); });

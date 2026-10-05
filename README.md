@@ -37,6 +37,8 @@ Cloudflare Pages and Netlify work too: point them at the repo, with no build com
 
 **After an upload, refresh properly.** GitHub Pages serves every file with a ten-minute cache, so a browser can pick up the new `app.js` next to the old `index.html`. The two no longer fit: `boot()` throws on an element that isn't there any more, the sensor still connects (that listener is wired first) but nothing is saved or drawn. Hard-refresh after uploading — `Cmd/Ctrl+Shift+R`, or Site settings -> Clear & reset on Android, and clear the home-screen app's storage too. The page guards against this itself: `app.js` sets `window.__booted` once it is up, and the small script at the bottom of `index.html` refetches the files past the cache and reloads if that flag is missing after five seconds. It only ever does this once per tab, so a genuine fault can't turn into a reload loop.
 
+**Bump the version on every upload.** `index.html` loads `styles.css`, `app.js` and `debug.js` with a `?v=` date (e.g. `debug.js?v=20261005`). Change all three to today's date whenever you upload a change to any of them. A new `index.html` then asks for URLs the browser has never cached, so it can't be paired with an old script. Forgetting this is how a new button can show up and do nothing: the new page runs with the old `debug.js`.
+
 ## Run it locally for testing
 
 Web Bluetooth only works on `https://` or on `localhost`, so serve the folder rather than double-clicking `index.html`:
