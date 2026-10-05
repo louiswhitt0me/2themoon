@@ -120,10 +120,12 @@
           <button type="button" class="btn-small" data-dbg="zoom-in">+</button>
           <button type="button" class="btn-small" data-dbg="follow">Follow live</button>
           <button type="button" class="btn-small" data-dbg="fit">Fit</button>
+          <button type="button" class="btn-small" data-dbg="smooth" aria-pressed="true">Filtered</button>
           <button type="button" class="btn-small" data-dbg="axes" aria-pressed="false">x/y/z</button>
         </div>
         <p class="dbg-legend">
-          <span class="key key-v">v (what the detector uses)</span>
+          <span class="key key-v">v (raw)</span>
+          <span class="key key-s">filtered (what the detector uses)</span>
           <span class="key key-x">x</span><span class="key key-y">y</span><span class="key key-z">z</span>
           <span class="key key-flight">flight</span><span class="key key-contact">contact</span>
         </p>
@@ -166,7 +168,7 @@
         <div id="dbg-log" class="dbg-log" aria-live="off"></div>
         <form id="dbg-cmd-form" class="dbg-cmd" autocomplete="off">
           <label class="sr-only" for="dbg-cmd">Command</label>
-          <input id="dbg-cmd" type="text" placeholder="Command, e.g. t land_t 2.5" enterkeyhint="send" spellcheck="false">
+          <input id="dbg-cmd" type="text" placeholder="Command, e.g. t smooth_ms 120" enterkeyhint="send" spellcheck="false">
           <button type="submit" class="btn-primary">Send</button>
         </form>
         <div class="dbg-row">

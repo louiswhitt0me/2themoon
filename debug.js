@@ -63,6 +63,34 @@ function verticalG(ax, ay, az, g0) {
   return (ax * g0[0] + ay * g0[1] + az * g0[2]) / m2;
 }
 
+/** The detector's s: v through the same causal moving average as
+    Detector::smooth(), so the line on the plot is the line hump_t, leave_t and
+    rise_t are compared against. Same window maths as applyParams(): smooth_ms
+    converted at the nominal 400 Hz, clamped to 1..SMOOTH_MAX samples. The
+    average restarts across a gap (as markGap() does) and reads NaN until the
+    window is full, because the firmware ignores it until then too.
+    Returns s and its lag in samples: s[i] describes sample idx[i] - delay,
+    which is also how the DJ marks are expressed. */
+const ODR_HZ = 400, SMOOTH_MAX = 80;
+function smoothedG(idx, v, smoothMs) {
+  const ms = Number.isFinite(smoothMs) ? smoothMs : 100;
+  const n = Math.max(1, Math.min(SMOOTH_MAX, Math.trunc((ms * ODR_HZ) / 1000)));
+  const out = new Float32Array(v.length);
+  const ring = new Float64Array(n);
+  let head = 0, count = 0, sum = 0;
+  for (let i = 0; i < v.length; i++) {
+    if (i > 0 && idx[i] !== idx[i - 1] + 1) { head = 0; count = 0; sum = 0; }
+    const x = v[i];
+    if (!Number.isFinite(x)) { head = 0; count = 0; sum = 0; out[i] = NaN; continue; }
+    if (count === n) sum -= ring[head]; else count++;
+    ring[head] = x;
+    sum += x;
+    head = (head + 1) % n;
+    out[i] = count === n ? sum / n : NaN;
+  }
+  return { s: out, delay: (n - 1) / 2, n };
+}
+
 /** Time since boot for the cursor readout: "20m 08s 306ms", with hours
     added once a session runs past 60 minutes. */
 function fmtClock(ms) {
@@ -115,8 +143,14 @@ const Debug = {
 
   // view
   view: { start: 0, span: DBG.defaultSpan, follow: true, yMin: -1.5, yMax: 6 },
-  show: { v: true, axes: false },
+  // smooth: the detector's moving-averaged s, over the raw v. On by default:
+  // on the mat raw v is mostly rattle, and s is what every edge is found on.
+  show: { v: true, axes: false, smooth: true },
   cursor: null,
+  // s is derived from d.v, so it is recomputed (lazily, in draw) whenever the
+  // samples or smooth_ms change. dataVer bumps on every change to d.
+  dataVer: 0,
+  _smooth: null,   // {ver, ms, s, xs, delay, n}
 
   /* ---------- lifecycle ---------- */
   init() {
@@ -133,7 +167,10 @@ const Debug = {
       if (q.get('debug') === '1') localStorage.setItem(DBG.storageKey, '1');
       if (q.get('debug') === '0') localStorage.removeItem(DBG.storageKey);
       on = localStorage.getItem(DBG.storageKey) === '1';
+      if (localStorage.getItem(DBG.storageKey + '-smooth') === '0') this.show.smooth = false;
     } catch (e) { /* private mode: stay off */ }
+    const smoothBtn = document.querySelector('[data-dbg="smooth"]');
+    if (smoothBtn) smoothBtn.setAttribute('aria-pressed', String(this.show.smooth));
     this.canvas = document.getElementById('scope');
     this.wire();
     this.setEnabled(on, { quiet: true });
@@ -178,7 +215,7 @@ const Debug = {
       case 'dumpGap':     this.gaps.push({ from: p.fromBlock, to: p.toBlock, at: this.lastIdx() }); break;
       case 'dumpEnd':     this.dumpMode = null; this.paint(); break;
       case 'jumpMarks':   this.keep(this.marks, p, DBG.maxEvents); this.paint(); break;
-      case 'param':       this.params.set(p.name, { value: p.value, lo: p.lo, hi: p.hi, def: p.def }); this.renderParams(); break;
+      case 'param':       this.params.set(p.name, { value: p.value, lo: p.lo, hi: p.hi, def: p.def }); this.renderParams(); this.paint(); break;
       case 'calib':       this.g0 = p.g0; this.periodUs = p.periodUs; this.addEvent(this.lastIdx(), 'calib', 'g0'); break;
       case 'reject':      this.addEvent(p.idx, 'reject', p.reason); break;
       case 'error':       this.addEvent(p.idx, 'error', p.reason); break;
@@ -247,6 +284,7 @@ const Debug = {
       const cut = DBG.trimChunk;
       for (const k of ['idx', 'ax', 'ay', 'az', 'v']) d[k].splice(0, cut);
     }
+    this.dataVer++;
     this.paint();
     this.renderStatus();
   },
@@ -260,6 +298,7 @@ const Debug = {
   clearSignal() {
     if (this.viewing) { this.backToLive(); return; }
     this.d = { idx: [], ax: [], ay: [], az: [], v: [] };
+    this.dataVer++;
     this.events = []; this.states = []; this.marks = []; this.gaps = [];
     this.blocksIn = 0;
     this.view.follow = true;
@@ -281,6 +320,26 @@ const Debug = {
       toast("Couldn't send that to the sensor");
       return false;
     }
+  },
+
+  /* ---------- the smoothed signal ---------- */
+  // The setting the plot is drawn under: a saved capture's own, else the
+  // sensor's live one. Before the T lines arrive, the firmware default.
+  paramValue(name) {
+    const v = this.viewing ? (this.viewing.params || {})[name] : (this.params.get(name) || {}).value;
+    return Number.isFinite(v) ? v : undefined;
+  },
+
+  smoothed() {
+    const ms = this.paramValue('smooth_ms');
+    const c = this._smooth;
+    if (c && c.ver === this.dataVer && c.ms === ms) return c;
+    const { s, delay, n } = smoothedG(this.d.idx, this.d.v, ms);
+    // Plotted at the sample it describes, not the one it was computed at, so
+    // it sits on the raw trace and the onset/takeoff/land marks line up with it.
+    const xs = new Float64Array(s.length);
+    for (let i = 0; i < s.length; i++) xs[i] = this.d.idx[i] - delay;
+    return (this._smooth = { ver: this.dataVer, ms, s, xs, delay, n });
   },
 
   /* ---------- redraw scheduling ---------- */
@@ -358,7 +417,18 @@ const Debug = {
       this.trace(ctx, d.idx, d.ay, i0, i1, px, py, '#7CF5C8', 1.1 * dpr, W);
       this.trace(ctx, d.idx, d.az, i0, i1, px, py, '#B79BFF', 1.1 * dpr, W);
     }
-    if (this.show.v) this.trace(ctx, d.idx, d.v, i0, i1, px, py, tok('--moon', '#FFE17A'), 2.1 * dpr, W);
+    if (this.show.v) {
+      // With s on top, raw v steps back: it is context, s is the answer.
+      ctx.globalAlpha = this.show.smooth ? 0.45 : 1;
+      this.trace(ctx, d.idx, d.v, i0, i1, px, py, tok('--moon', '#FFE17A'), (this.show.smooth ? 1.2 : 2.1) * dpr, W);
+      ctx.globalAlpha = 1;
+    }
+    if (this.show.smooth) {
+      const sm = this.smoothed();
+      const j0 = Math.max(0, lowerBound(sm.xs, n, x0) - 1);
+      const j1 = Math.min(n, lowerBound(sm.xs, n, x0 + span) + 1);
+      this.trace(ctx, sm.xs, sm.s, j0, j1, px, py, tok('--text', '#F3F5FF'), 2.2 * dpr, W, true);
+    }
 
     this.drawMarks(ctx, px, H, dpr, tok);
     this.drawEvents(ctx, px, H, dpr, tok);
@@ -383,13 +453,15 @@ const Debug = {
     ctx.globalAlpha = 1;
   },
 
-  // land_t / onset_t / takeoff_t drawn where they actually sit, so you can see
-  // at a glance whether a hump would have cleared them.
+  // The two levels the detector compares s against, drawn where they sit, so
+  // you can see at a glance whether a hump cleared hump_t and whether a trough
+  // got low enough to count as a takeoff. (rise_t is a climb out of the trough,
+  // not a level, so it has no line.) Any setting the sensor doesn't report —
+  // an older firmware, or a capture saved under one — is just skipped.
   drawThresholds(ctx, py, W, dpr, tok) {
     const lines = [
-      ['land_t', tok('--danger', '#FF4D6A')],
-      ['onset_t', tok('--bed', '#FF8A3D')],
-      ['takeoff_t', tok('--air', '#5CB8FF')],
+      ['hump_t', tok('--bed', '#FF8A3D')],
+      ['leave_t', tok('--air', '#5CB8FF')],
     ];
     ctx.save();
     ctx.setLineDash([5 * dpr, 4 * dpr]);
@@ -399,8 +471,8 @@ const Debug = {
     ctx.textBaseline = 'bottom';
     for (const [name, colour] of lines) {
       // A saved capture is drawn against the settings it was recorded under.
-      const value = this.viewing ? (this.viewing.params || {})[name] : (this.params.get(name) || {}).value;
-      if (!Number.isFinite(value)) continue;
+      const value = this.paramValue(name);
+      if (value === undefined) continue;
       const y = Math.round(py(value)) + 0.5;
       ctx.strokeStyle = colour;
       ctx.globalAlpha = 0.85;
@@ -494,8 +566,10 @@ const Debug = {
   },
 
   /** Min/max per pixel column once there is more than one sample per pixel —
-      otherwise a 400 Hz signal aliases into something that looks calm. */
-  trace(ctx, xs, ys, i0, i1, px, py, colour, width, W) {
+      otherwise a 400 Hz signal aliases into something that looks calm.
+      join: link each column to the next, for a signal that is already smooth
+      (s), which would otherwise break into dashes wherever it is steep. */
+  trace(ctx, xs, ys, i0, i1, px, py, colour, width, W, join = false) {
     if (i1 - i0 < 2) return;
     ctx.strokeStyle = colour;
     ctx.lineWidth = width;
@@ -505,17 +579,20 @@ const Debug = {
     const perPixel = (i1 - i0) / W;
     if (perPixel > 1.5) {
       let col = Math.floor(px(xs[i0]));
-      let lo = Infinity, hi = -Infinity;
+      let lo = Infinity, hi = -Infinity, linked = false;
+      const column = () => {
+        if (!(lo <= hi)) { linked = false; return; }   // NaN run: lift the pen
+        if (join && linked) ctx.lineTo(col + 0.5, py(hi)); else ctx.moveTo(col + 0.5, py(hi));
+        ctx.lineTo(col + 0.5, py(lo));
+        linked = true;
+      };
       for (let i = i0; i < i1; i++) {
         const c = Math.floor(px(xs[i]));
-        if (c !== col) {
-          if (lo <= hi) { ctx.moveTo(col + 0.5, py(hi)); ctx.lineTo(col + 0.5, py(lo)); }
-          col = c; lo = Infinity; hi = -Infinity;
-        }
+        if (c !== col) { column(); col = c; lo = Infinity; hi = -Infinity; }
         const y = ys[i];
         if (Number.isFinite(y)) { if (y < lo) lo = y; if (y > hi) hi = y; }
       }
-      if (lo <= hi) { ctx.moveTo(col + 0.5, py(hi)); ctx.lineTo(col + 0.5, py(lo)); }
+      column();
     } else {
       let started = false;
       for (let i = i0; i < i1; i++) {
@@ -543,9 +620,18 @@ const Debug = {
     const read = document.getElementById('scope-read');
     if (read) {
       const clock = this.periodUs ? fmtClock((d.idx[i] * this.periodUs) / 1000) : '?';
+      // s at this sample: the average is lagged, so read it from the entry
+      // computed delay samples later (the one plotted here).
+      let sTxt = '';
+      if (this.show.smooth) {
+        const sm = this.smoothed();
+        const j = lowerBound(sm.xs, sm.xs.length, d.idx[i]);
+        const sv = j < sm.xs.length && Math.abs(sm.xs[j] - d.idx[i]) < 1 ? sm.s[j] : NaN;
+        sTxt = ` · s <b>${Number.isFinite(sv) ? sv.toFixed(3) : '–'}</b>`;
+      }
       read.innerHTML =
         `<b>#${d.idx[i]}</b> <span class="dim">${clock}</span> · ` +
-        `v <b>${d.v[i].toFixed(3)}</b> · x ${d.ax[i].toFixed(2)} y ${d.ay[i].toFixed(2)} z ${d.az[i].toFixed(2)}`;
+        `v <b>${d.v[i].toFixed(3)}</b>${sTxt} · x ${d.ax[i].toFixed(2)} y ${d.ay[i].toFixed(2)} z ${d.az[i].toFixed(2)}`;
     }
   },
 
@@ -567,10 +653,13 @@ const Debug = {
     const i0 = Math.max(0, lowerBound(d.idx, n, this.view.start));
     const i1 = Math.min(n, lowerBound(d.idx, n, this.view.start + this.view.span));
     let lo = Infinity, hi = -Infinity;
-    const series = this.show.axes ? ['v', 'ax', 'ay', 'az'] : ['v'];
-    for (const k of series) {
+    const series = [];
+    if (this.show.v) series.push(d.v);
+    if (this.show.axes) series.push(d.ax, d.ay, d.az);
+    if (this.show.smooth) series.push(this.smoothed().s);
+    for (const ys of series) {
       for (let i = i0; i < i1; i++) {
-        const y = d[k][i];
+        const y = ys[i];
         if (!Number.isFinite(y)) continue;
         if (y < lo) lo = y; if (y > hi) hi = y;
       }
@@ -720,6 +809,7 @@ const Debug = {
     const d = { idx: Array.from(c.idx), ax: Array.from(c.ax), ay: Array.from(c.ay), az: Array.from(c.az), v: [] };
     for (let i = 0; i < d.idx.length; i++) d.v.push(verticalG(d.ax[i], d.ay[i], d.az[i], c.g0));
     this.d = d;
+    this.dataVer++;
     this.events = (c.events || []).slice();
     this.states = (c.states || []).slice();
     this.marks = (c.marks || []).slice();
@@ -823,6 +913,12 @@ const Debug = {
         case 'pause':    this.paused = !this.paused; btn.textContent = this.paused ? 'Resume' : 'Pause'; break;
         case 'blocks':   this.showBlocks = !this.showBlocks; btn.setAttribute('aria-pressed', String(this.showBlocks)); break;
         case 'axes':     this.show.axes = !this.show.axes; btn.setAttribute('aria-pressed', String(this.show.axes)); this.paint(); break;
+        case 'smooth':
+          this.show.smooth = !this.show.smooth;
+          btn.setAttribute('aria-pressed', String(this.show.smooth));
+          try { localStorage.setItem(DBG.storageKey + '-smooth', this.show.smooth ? '1' : '0'); } catch (err) { /* ignore */ }
+          this.paint();
+          break;
         case 'zoom-in':  this.zoom(0.5); break;
         case 'zoom-out': this.zoom(2); break;
         case 'follow':   this.follow(); break;

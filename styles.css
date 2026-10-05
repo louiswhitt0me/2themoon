@@ -703,6 +703,7 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
 .key { display: inline-flex; align-items: center; gap: 5px; }
 .key::before { content: ""; width: 14px; height: 3px; border-radius: 2px; background: currentColor; }
 .key-v { color: var(--moon); }
+.key-s { color: var(--text); }
 .key-x { color: #FF6BD6; }
 .key-y { color: #7CF5C8; }
 .key-z { color: #B79BFF; }
