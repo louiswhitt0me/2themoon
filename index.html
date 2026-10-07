@@ -10,12 +10,12 @@
   <title>2themoon</title>
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="styles.css?v=20261005">
-  <script src="app.js?v=20261005" defer></script>
+  <link rel="stylesheet" href="styles.css?v=20261007">
+  <script src="app.js?v=20261007" defer></script>
   <!-- Debug tools: the scope, the serial monitor and the tuning panel. Loaded
        after app.js (defer keeps the order) and optional — app.js guards every
        call into it, so a failure here never stops jumps being recorded. -->
-  <script src="debug.js?v=20261005" defer></script>
+  <script src="debug.js?v=20261007" defer></script>
 </head>
 <body>
   <div class="sky" aria-hidden="true"><div class="twinkle"></div><div class="moon"></div><div class="horizon"></div></div>
@@ -78,6 +78,9 @@
 
       <div id="live-stats" class="stats"></div>
       <div id="live-chart" class="chart-card"></div>
+      <!-- Competition-style time of flight: the next 10 bounces added up. Shown
+           while a sensor (or the demo) is sending; app.js drives #tb-layer. -->
+      <button type="button" id="tb-btn" class="btn-primary btn-huge tb-btn" hidden>10 bounce time</button>
     </section>
 
     <!-- ============ SESSION ============ -->
@@ -235,9 +238,17 @@
       </div>
       <div id="turn-overlay-stats" class="stats"></div>
       <div id="turn-overlay-chart" class="chart-card"></div>
+      <!-- A 10 bounce time picked from a jump on this chart; see renderOverlayTb(). -->
+      <div id="turn-overlay-tb" class="tb-panel" hidden aria-live="polite"></div>
       <!-- Buttons depend on whether a turn or one of its sets is open; see renderOverlay(). -->
       <div id="turn-overlay-actions" class="action-row"></div>
     </div>
+  </section>
+
+  <!-- ============ 10 bounce time (live) ============
+       Dims the screen behind it: Start / Cancel, then the count, then the result. -->
+  <section id="tb-layer" class="tb-layer" hidden role="dialog" aria-modal="true" aria-labelledby="tb-title">
+    <div id="tb-card" class="tb-card"></div>
   </section>
 
   <!-- ============ Results card (for photos) ============ -->

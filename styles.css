@@ -611,6 +611,90 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
 }
 .toast button { background: var(--moon); color: var(--on-light); border: 0; border-radius: 999px; min-height: 38px; padding: 0 14px; font: 800 16px/1 var(--display); letter-spacing: .05em; text-transform: uppercase; white-space: nowrap; }
 
+/* ---------- 10 bounce time ---------- */
+.tb-btn { align-self: center; max-width: 520px; flex: none; }
+/* The live layer: the screen behind fades, the card holds Start / the count / the result. */
+.tb-layer {
+  position: fixed; inset: 0; z-index: 40;
+  display: flex; align-items: center; justify-content: center;
+  padding: calc(16px + env(safe-area-inset-top)) var(--gutter) calc(16px + env(safe-area-inset-bottom));
+  background: rgba(3,5,16,.62); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
+  animation: tb-fade .2s ease-out both;
+}
+.tb-card {
+  width: 100%; max-width: 440px; max-height: 100%; overflow-y: auto;
+  display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center;
+  padding: 22px 18px 18px; border-radius: 22px; border: 1px solid rgba(255,225,122,.5);
+  background: radial-gradient(circle at 92% 0%, rgba(255,225,122,.22), transparent 45%), var(--stars-b), #10164A;
+  box-shadow: 0 20px 60px rgba(0,0,0,.6), 0 0 30px rgba(255,225,122,.12);
+}
+.tb-card .kicker { margin: 0; }
+.tb-title { margin: 0; font: italic 800 30px/1 var(--display); text-transform: uppercase; color: var(--moon); }
+.tb-text { margin: 0; color: var(--text-2); font-weight: 600; }
+.tb-text b { font: 800 22px/1 var(--display); color: var(--air-ink); font-variant-numeric: tabular-nums; }
+.tb-start { justify-content: center; max-width: none; min-height: 96px; font-size: 40px; margin-top: 4px; }
+.tb-cancel { min-width: 120px; }
+.tb-count { display: flex; align-items: baseline; gap: 8px; font-family: var(--display); font-variant-numeric: tabular-nums; }
+.tb-count b { font-size: 96px; line-height: .9; font-weight: 800; color: var(--moon); text-shadow: 0 0 24px var(--moon-glow); }
+.tb-count span { font-size: 36px; font-weight: 800; color: var(--text-2); }
+.tb-pips { display: grid; grid-template-columns: repeat(10, 1fr); gap: 5px; width: 100%; max-width: 320px; }
+.tb-pips i { height: 10px; border-radius: 5px; background: var(--card-2); border: 1px solid var(--line); }
+.tb-pips i.on { background: var(--air); border-color: var(--air); box-shadow: 0 0 8px rgba(92,184,255,.6); }
+.tb-hero { display: flex; flex-direction: column; align-items: center; }
+.tb-hero-label { font: 800 14px/1 var(--display); letter-spacing: .1em; text-transform: uppercase; color: var(--text-2); }
+.tb-hero-num { font: 800 80px/1 var(--display); color: var(--moon); font-variant-numeric: tabular-nums; text-shadow: 0 0 24px var(--moon-glow); }
+.tb-hero-num small { font-size: .4em; margin-left: 3px; }
+.tb-sub { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 18px; color: var(--text-2); font-weight: 600; }
+.tb-sub b { font: 800 24px/1 var(--display); color: var(--text); font-variant-numeric: tabular-nums; }
+.tb-sub-bed b { color: var(--bed-ink); }
+.tb-partial {
+  margin: 0; padding: 5px 12px; border-radius: 999px; background: rgba(255,200,61,.14); border: 1px solid var(--warn);
+  color: var(--warn); font: 800 16px/1.1 var(--display); letter-spacing: .05em; text-transform: uppercase;
+}
+.tb-note { margin: 0; color: var(--text-2); font-size: 14px; font-weight: 600; }
+.tb-saved { color: var(--good); font-weight: 700; }
+.tb-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; width: 100%; }
+.tb-card .tb-actions .btn-primary, .tb-card .tb-actions .btn-outline { flex: 1; min-width: 120px; }
+@keyframes tb-fade { from { opacity: 0; } to { opacity: 1; } }
+
+/* The run on a chart: a green band behind those bars, so it never reads as the selected (moonlight) one. */
+.jump.tb .hit { fill: rgba(61,220,151,.13); }
+.jump.tb .xlab { fill: var(--good); font-weight: 800; }
+.jump.tb.sel .hit { fill: rgba(255,225,122,.2); }
+.chart-detail .d-tb { margin-left: auto; }
+
+/* The panel under a turn or set's chart. */
+.tb-panel {
+  background: var(--card); border: 1px solid rgba(61,220,151,.5); border-radius: var(--radius); box-shadow: var(--shadow);
+  padding: 12px 14px 16px; display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center;
+}
+.tb-panel-head { align-self: stretch; display: flex; align-items: center; gap: 10px; }
+.tb-panel-head .tb-title { font-size: 24px; }
+.tb-range { color: var(--text-2); font-weight: 700; margin-right: auto; }
+.tb-panel .tb-hero-num { font-size: 64px; }
+.tb-panel .tb-actions .btn-primary { min-width: 160px; }
+
+/* History › 10 bounce */
+.hist-seg { align-self: flex-start; }
+.hist-seg .seg-btn { min-height: 40px; padding: 0 16px; font-size: 17px; }
+.seg-count { display: inline-block; min-width: 1.5em; margin-left: 4px; padding: 2px 5px; border-radius: 999px; background: rgba(0,0,0,.18); font-size: 13px; }
+.tb-item { display: flex; align-items: center; gap: 4px; }
+.tb-rec { grid-template-columns: 1fr auto; }
+.tb-who { font: 800 22px/1.1 var(--display); text-transform: uppercase; overflow-wrap: anywhere; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.tb-air { grid-row: span 2; font: 800 34px/1 var(--display); color: var(--moon); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.tb-air small { font-size: .42em; color: var(--text-2); margin-left: 3px; }
+.tb-meta { color: var(--text-2); font-size: 14px; font-weight: 600; grid-column: 1; }
+.tb-meta:last-child { grid-column: 1 / -1; }
+.tb-del { flex: none; min-width: 44px; min-height: 44px; }
+.tb-del:hover { color: #FF8A9C; }
+
+@media (max-height: 560px) {
+  .tb-card { gap: 8px; padding: 14px 16px; }
+  .tb-start { min-height: 64px; font-size: 30px; }
+  .tb-count b { font-size: 64px; }
+  .tb-hero-num { font-size: 56px; }
+}
+
 /* ---------- Larger screens / landscape ---------- */
 @media (min-width: 720px) {
   .stats { grid-template-columns: repeat(6, 1fr); }

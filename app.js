@@ -63,6 +63,12 @@ const CONFIG = {
     4: 'Data gap just before this jump',
   },
 
+  // --- 10 bounce time --------------------------------------------------------
+  // How a routine's time of flight is judged at competition: the air time of
+  // ten consecutive bounces added up. Counting starts with the first take-off
+  // after Start, and stays inside one set (a rest ends it early).
+  tenBounceCount: 10,
+
   // --- Debug screen (debug.js) ----------------------------------------------
   // Hidden until it is switched on with ?debug=1 or five taps on the wordmark,
   // so a club never trips over it. Once on it stays on for this browser.
@@ -80,7 +86,7 @@ const CONFIG = {
 
   // --- Storage --------------------------------------------------------------
   dbName: 'trampoline-sensor-v1',
-  dbVersion: 3,
+  dbVersion: 4,
 };
 
 /* ==========================================================================
@@ -329,6 +335,13 @@ const DB = {
           db.createObjectStore('captures', { keyPath: 'id', autoIncrement: true })
             .createIndex('startedAt', 'startedAt');
         }
+        // v4 adds saved 10 bounce times. Each points at the set it came from, so
+        // splitting or merging turns never orphans one.
+        if (e.oldVersion < 4 && !db.objectStoreNames.contains('tenBounce')) {
+          const tb = db.createObjectStore('tenBounce', { keyPath: 'id', autoIncrement: true });
+          tb.createIndex('sessionId', 'sessionId');
+          tb.createIndex('setId', 'setId');
+        }
       };
       req.onsuccess = () => { this.db = req.result; resolve(); };
       req.onerror = () => reject(req.error);
@@ -382,6 +395,8 @@ const S = {
   nameSheet: null,        // { mode: 'next' | 'current', summary } while the name sheet is up
   overlay: null,          // { kind: 'turn' | 'set', id } while the detail screen is up
   historyOpen: false,     // is the "Previous sessions" group expanded?
+  historyTab: 'sessions', // History screen: 'sessions' or 'tb' (saved 10 bounce times)
+  tbView: null,           // { setId, startJumpId } — the 10 bounce run shown on the detail screen
   precision: DEFAULT_PRECISION,   // decimals on every time shown, 1-3 (kept in meta)
   demo: null,
 };
@@ -535,6 +550,7 @@ async function handleJump(p) {
   list.splice(pos, 0, jump);
   S.seen.add(key);
   if (!S.lastJump || pos === list.length - 1) S.lastJump = jump;
+  if (TB.phase === 'counting') await tbOnJump(jump, pos === list.length - 1);
   renderAfterData({ newJump: true });
 }
 
@@ -553,6 +569,8 @@ async function closeSet() {
   if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
   const st = S.openSet;
   if (!st) return;
+  // The jumper stopped mid-count: what they did is shown, marked incomplete.
+  if (TB.phase === 'counting' && TB.jumps.length && TB.setId === st.id) await tbFinish();
   S.openSet = null;
   const list = S.jumps.get(st.id) || [];
   if (!list.length) {
@@ -633,6 +651,7 @@ async function deleteSet(setId) {
   if (!st) return;
   if (S.openSet && S.openSet.id === setId) S.openSet = null;
   await DB.delByIndex('jumps', 'setId', setId);
+  await DB.delByIndex('tenBounce', 'setId', setId);
   await DB.del('sets', setId);
   await normaliseSession(st.sessionId);
   await reloadIfCurrent(st.sessionId);
@@ -645,6 +664,7 @@ async function deleteTurn(turnId) {
   if (S.openTurn && S.openTurn.id === turnId) { S.openTurn = null; S.openSet = null; }
   for (const st of await DB.byIndex('sets', 'turnId', turnId)) {
     await DB.delByIndex('jumps', 'setId', st.id);
+    await DB.delByIndex('tenBounce', 'setId', st.id);
     await DB.del('sets', st.id);
   }
   await DB.del('turns', turnId);
@@ -709,6 +729,7 @@ async function mergeTurnIntoPrevious(turnId) {
 
 async function deleteSession(sessionId) {
   await DB.delByIndex('jumps', 'sessionId', sessionId);
+  await DB.delByIndex('tenBounce', 'sessionId', sessionId);
   await DB.delByIndex('sets', 'sessionId', sessionId);
   await DB.delByIndex('turns', 'sessionId', sessionId);
   await DB.del('sessions', sessionId);
@@ -1099,10 +1120,12 @@ async function stopDemo({ restore = true } = {}) {
    ========================================================================== */
 let chartUid = 0;
 class JumpChart {
-  constructor(root, { live = false, fit = false, showDetail = true, showSets = false, emptyText = '' } = {}) {
+  constructor(root, { live = false, fit = false, showDetail = true, showSets = false, emptyText = '', onTenBounce = null } = {}) {
     this.root = root; this.live = live; this.fit = fit; this.showDetail = showDetail && !fit;
     this.showSets = showSets;   // draw a divider and a "SET n" label where one burst ends and the next begins
     this.emptyText = emptyText;
+    this.onTenBounce = onTenBounce;   // given: the jump detail offers "See 10 bounce time" from that jump
+    this.highlight = new Set();       // ids of the jumps in a 10 bounce run, drawn as a band
     this.uid = ++chartUid;
     this.jumps = []; this.pinned = true; this.selected = null; this.newFrom = Infinity;
     root.innerHTML = `
@@ -1143,6 +1166,9 @@ class JumpChart {
       if (!g) return;
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.select(Number(g.dataset.i)); }
     });
+    if (this.detail) this.detail.addEventListener('click', (e) => {
+      if (e.target.closest('[data-tb]') && this.onTenBounce && this.jumps[this.selected]) this.onTenBounce(this.jumps[this.selected]);
+    });
     this.ro = new ResizeObserver(() => this.render());
     this.ro.observe(this.body);
     this.renderDetail();
@@ -1179,6 +1205,13 @@ class JumpChart {
     this.renderDetail();
   }
 
+  /** Scroll sideways so jump i is the first one in view. */
+  reveal(i) {
+    if (this.fit || !this.xs || this.xs[i] == null) return;
+    this.pinned = false;
+    this.scroller.scrollLeft = Math.max(0, this.xs[i] - 4);
+  }
+
   select(i) {
     this.selected = this.selected === i ? null : i;
     $$('.jump', this.plot).forEach((g) => g.classList.toggle('sel', Number(g.dataset.i) === this.selected));
@@ -1200,7 +1233,8 @@ class JumpChart {
       <span class="d-bed">Bed <b>${secs(j.contactMs)} s</b></span>
       <span>Peak <b>${j.peakG.toFixed(1)} g</b></span>
       ${j.flags ? `<span class="d-flag" title="${esc(ft)}">Flags ${j.flags}${ft ? ' · ' + esc(ft) : ''}</span>` : ''}
-      <span class="d-raw">Sensor #${j.index}</span>`;
+      <span class="d-raw">Sensor #${j.index}</span>
+      ${this.onTenBounce ? '<button type="button" class="btn-small btn-outline d-tb" data-tb>See 10 bounce time</button>' : ''}`;
   }
 
   render() {
@@ -1233,6 +1267,7 @@ class JumpChart {
       }
       xs[i] = i * groupW + gaps * gapW;
     }
+    this.xs = xs;
     const contentW = this.fit ? scrollerW : Math.max(scrollerW, n * groupW + gaps * gapW + 16);
     this.plot.setAttribute('width', contentW);
 
@@ -1285,7 +1320,7 @@ class JumpChart {
       const w = barW.toFixed(1);
       // air segment: rounded top corners only
       const airPath = `M${x0.toFixed(1)} ${yBed.toFixed(1)} V${(yTop + rx).toFixed(1)} q0 ${-rx} ${rx} ${-rx} h${(barW - 2 * rx).toFixed(1)} q${rx} 0 ${rx} ${rx} V${yBed.toFixed(1)} z`;
-      out += `<g class="jump${isNew ? ' new' : ''}${this.selected === i ? ' sel' : ''}" data-i="${i}"${this.fit ? '' : ' tabindex="0" role="button"'}
+      out += `<g class="jump${isNew ? ' new' : ''}${this.selected === i ? ' sel' : ''}${this.highlight.has(j.id) ? ' tb' : ''}" data-i="${i}"${this.fit ? '' : ' tabindex="0" role="button"'}
           aria-label="Jump ${i + 1}: total ${secs(totalMs)} seconds, air ${secs(j.flightMs)}, bed ${secs(j.contactMs)}${j.flags ? ', flagged' : ''}">
         <rect class="hit" x="${gx}" y="${top - 24}" width="${groupW}" height="${plotH + 24 + bottom}" rx="8"/>
         <g class="bar">
@@ -1370,6 +1405,7 @@ function renderConnection() {
 
   const connected = state === 'connected' || state === 'reconnecting';
   $('#connect-panel').hidden = connected || !!S.demo;
+  $('#tb-btn').hidden = !connected && !S.demo;
   const cbtn = $('#connect-btn');
   cbtn.disabled = !BLE.supported() || state === 'connecting';
   $('.btn-main', cbtn).textContent = state === 'connecting' ? 'Connecting…' : 'Connect sensor';
@@ -1416,6 +1452,7 @@ function renderLive({ newJump = false } = {}) {
   nameBtn.classList.toggle('unnamed', !!turn && !turn.jumper);
   $('#next-jumper-btn').hidden = !S.openTurn;
   $('#live-stats').innerHTML = statsHTML(jumps);
+  liveChart.highlight = new Set(TB.jumps.map((j) => j.id));   // the bounces being counted
   liveChart.setJumps(jumps, { animate: newJump && !turnChanged, resetView: turnChanged });
 }
 
@@ -1535,9 +1572,12 @@ function sessionCardHTML(s, setCounts, turnCounts) {
 async function renderHistory() {
   const root = $('#history-content');
   const sessions = (await DB.all('sessions')).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const allTurns = await DB.all('turns'), allSets = await DB.all('sets');
   const turnCounts = new Map(), setCounts = new Map();
-  for (const t of await DB.all('turns')) turnCounts.set(t.sessionId, (turnCounts.get(t.sessionId) || 0) + 1);
-  for (const s of await DB.all('sets')) setCounts.set(s.sessionId, (setCounts.get(s.sessionId) || 0) + 1);
+  for (const t of allTurns) turnCounts.set(t.sessionId, (turnCounts.get(t.sessionId) || 0) + 1);
+  for (const s of allSets) setCounts.set(s.sessionId, (setCounts.get(s.sessionId) || 0) + 1);
+  const tbs = (await DB.all('tenBounce')).sort((a, b) => (b.at || b.createdAt).localeCompare(a.at || a.createdAt));
+  const onTb = S.historyTab === 'tb';
   const hasDemo = sessions.some((s) => s.demo);
   const today = dayKey(new Date().toISOString());
   const todays = sessions.filter((s) => dayKey(s.createdAt) === today);
@@ -1555,6 +1595,11 @@ async function renderHistory() {
   root.innerHTML = `
     <div class="page-head"><h1 id="history-title" class="page-title">History</h1>
       <p class="page-meta"><span>${sessions.length} session${sessions.length === 1 ? '' : 's'} saved on this device</span>${used != null ? `<span>${fmtBytes(used)} used</span>` : ''}</p></div>
+    <div class="seg hist-seg" role="group" aria-label="Show">
+      <button type="button" class="seg-btn" data-action="htab" data-htab="sessions" aria-pressed="${!onTb}">Sessions</button>
+      <button type="button" class="seg-btn" data-action="htab" data-htab="tb" aria-pressed="${onTb}">10 bounce${tbs.length ? ` <span class="seg-count">${tbs.length}</span>` : ''}</button>
+    </div>
+    ${onTb ? tbListHTML(tbs, new Map(allSets.map((x) => [x.id, x])), new Map(allTurns.map((x) => [x.id, x])), new Map(sessions.map((x) => [x.id, x]))) : `
     <div class="toolbar">
       ${sessions.length ? '<button type="button" class="btn-small btn-outline" data-action="csv-all">Export everything (CSV)</button>' : ''}
       ${hasDemo ? '<button type="button" class="btn-small btn-outline btn-danger" data-action="delete-demo">Delete all demo data</button>' : ''}
@@ -1573,7 +1618,7 @@ async function renderHistory() {
       </div>
       ${S.historyOpen ? days.map((d) => `<h3 class="day-label">${esc(dayLabel(d.key))}</h3>
         <ul class="list">${d.list.map((s) => sessionCardHTML(s, setCounts, turnCounts)).join('')}</ul>`).join('')
-        : '<p class="group-hint">Everything from before today. Tap to open.</p>'}` : ''}`;
+        : '<p class="group-hint">Everything from before today. Tap to open.</p>'}` : ''}`}`;
 }
 
 function showView(view, { sessionId = null } = {}) {
@@ -1589,8 +1634,9 @@ function showView(view, { sessionId = null } = {}) {
 }
 
 /* ---------- Turn / set detail overlay ---------- */
-async function openOverlay(kind, id) {
+async function openOverlay(kind, id, { tb = null } = {}) {
   S.overlay = { kind, id };
+  S.tbView = tb;
   $('#turn-overlay').hidden = false;
   document.body.style.overflow = 'hidden';
   await renderOverlay(true);
@@ -1598,6 +1644,7 @@ async function openOverlay(kind, id) {
 }
 function closeOverlay() {
   S.overlay = null;
+  S.tbView = null;
   $('#turn-overlay').hidden = true;
   document.body.style.overflow = '';
 }
@@ -1648,7 +1695,18 @@ async function renderOverlay(first = false) {
   $('#turn-overlay-stats').innerHTML = statsHTML(list);
   overlayChart.live = isTurn ? liveTurn : liveSet;
   overlayChart.showSets = isTurn;             // a turn's chart is divided set by set
+  // A 10 bounce run picked on this screen, or opened from History.
+  let run = [], startIdx = -1;
+  if (S.tbView) {
+    startIdx = list.findIndex((j) => j.id === S.tbView.startJumpId);
+    if (startIdx < 0) S.tbView = null;
+    else run = tbRun(list, startIdx);
+  }
+  overlayChart.highlight = new Set(run.map((j) => j.id));
   overlayChart.setJumps(list, { resetView: first, animate: !first });
+  if (first && startIdx >= 0) { overlayChart.select(startIdx); overlayChart.reveal(startIdx); }
+  await renderOverlayTb(run, startIdx);
+  if (S.overlay !== showing) return;
 
   const setIndex = isTurn ? -1 : sets.findIndex((s) => s.id === set.id);
   const isLive = isTurn ? liveTurn : liveSet;
@@ -1691,6 +1749,197 @@ async function openResults(kind, id) {
 function closeResults() {
   $('#results').hidden = true;
   if (!S.overlay) document.body.style.overflow = '';
+}
+
+/* ==========================================================================
+   10 bounce time — the air time of ten consecutive bounces added up, which is
+   how a routine's time of flight is judged at competition.
+   Live: press Start, and the first take-off after that is bounce 1.
+   Looking back: tap a jump, and it plus the next nine in the same set.
+   ========================================================================== */
+const TB = {
+  phase: null,      // null | 'ready' (Start / Cancel) | 'counting' | 'done'
+  startWall: 0,     // Date.now() when Start was pressed
+  setId: null,      // the set being counted (fixed by bounce 1)
+  jumps: [],        // the bounces counted so far
+  saved: false,
+};
+
+function tbSums(jumps) {
+  let air = 0, bed = 0;
+  for (const j of jumps) { air += j.flightMs; bed += j.contactMs; }
+  return { n: jumps.length, air, bed, total: air + bed };
+}
+
+/** Up to ten jumps from list[start] on, never crossing into another set. */
+function tbRun(list, start) {
+  const run = [];
+  for (let i = start; i < list.length && run.length < CONFIG.tenBounceCount; i++) {
+    if (list[i].setId !== list[start].setId) break;
+    run.push(list[i]);
+  }
+  return run;
+}
+
+async function tbSave(jumps, turn, source) {
+  const t = tbSums(jumps);
+  const rec = {
+    sessionId: jumps[0].sessionId, setId: jumps[0].setId, startJumpId: jumps[0].id,
+    jumpIds: jumps.map((j) => j.id), n: t.n, airMs: t.air, bedMs: t.bed, totalMs: t.total,
+    jumper: turn ? turn.jumper || null : null,   // fallback only: the list shows the turn's current name
+    at: jumps[0].receivedAt, createdAt: new Date().toISOString(), source, demo: !!jumps[0].demo,
+  };
+  rec.id = await DB.put('tenBounce', rec);
+  return rec;
+}
+
+/** Air time is the score, so it is the big number; total and bed sit under it. */
+function tbNumbersHTML(t) {
+  return `<div class="tb-hero"><span class="tb-hero-label">Time of flight</span>
+      <span class="tb-hero-num">${secs(t.air)}<small>s</small></span></div>
+    <div class="tb-sub">
+      <span class="tb-sub-total">Total <b>${secs(t.total)} s</b></span>
+      <span class="tb-sub-bed">Bed <b>${secs(t.bed)} s</b></span>
+    </div>`;
+}
+const tbPartialHTML = (n, tail = '') =>
+  `<p class="tb-partial">Incomplete · only ${n} bounce${n === 1 ? '' : 's'}${tail}</p>`;
+
+/* ---------- Live ---------- */
+function tbOpen() {
+  Object.assign(TB, { phase: 'ready', jumps: [], setId: null, saved: false });
+  $('#tb-layer').hidden = false;
+  renderTenBounce();
+  renderLive({});
+  $('#tb-card [data-tbl="start"]').focus();
+}
+function tbStart() {
+  Object.assign(TB, { phase: 'counting', startWall: Date.now(), jumps: [], setId: null, saved: false });
+  renderTenBounce();
+  renderLive({});
+  $('#tb-card [data-tbl="cancel"]').focus();
+}
+function tbClose() {
+  Object.assign(TB, { phase: null, jumps: [], setId: null });
+  $('#tb-layer').hidden = true;
+  renderLive({});
+  if (!$('#tb-btn').hidden) $('#tb-btn').focus();
+}
+
+/** Called from handleJump (inside the packet queue) for each jump while counting. */
+async function tbOnJump(jump, isLatest) {
+  // Backfilled jumps that slot in behind newer ones happened before Start.
+  if (!isLatest) return;
+  // A jump is reported when it lands, so it took off flightMs before it
+  // arrived. One that left the bed before Start was already under way.
+  const takeoff = new Date(jump.receivedAt).getTime() - jump.flightMs;
+  if (!TB.jumps.length && takeoff < TB.startWall) return;
+  if (TB.setId != null && jump.setId !== TB.setId) { await tbFinish(); return; }
+  TB.setId = jump.setId;
+  TB.jumps.push(jump);
+  if (TB.jumps.length >= CONFIG.tenBounceCount) await tbFinish();
+  else renderTenBounce();
+}
+
+function tbTurn() {
+  const set = TB.setId != null ? S.sets.find((x) => x.id === TB.setId) : null;
+  return (set && S.turns.find((t) => t.id === set.turnId)) || S.openTurn;
+}
+
+/** Ten bounces, or the set ended early. Only a full ten is saved. */
+async function tbFinish() {
+  TB.phase = 'done';
+  if (TB.jumps.length >= CONFIG.tenBounceCount) {
+    try { await tbSave(TB.jumps, tbTurn(), 'live'); TB.saved = true; } catch (e) { console.error('[tb] could not save', e); }
+  }
+  renderTenBounce();
+  const done = $('#tb-card [data-tbl="done"]');
+  if (done) done.focus();
+}
+
+function renderTenBounce() {
+  const card = $('#tb-card');
+  if (!TB.phase) { card.innerHTML = ''; return; }
+  const N = CONFIG.tenBounceCount;
+  const turn = tbTurn();
+  const t = tbSums(TB.jumps);
+  let body;
+  if (TB.phase === 'ready') {
+    body = `<p class="tb-text">Counting starts with the next take-off after you press Start.</p>
+      <button type="button" class="btn-primary btn-huge tb-start" data-tbl="start">Start</button>
+      <button type="button" class="btn-small btn-outline tb-cancel" data-tbl="cancel">Cancel</button>`;
+  } else if (TB.phase === 'counting') {
+    let pips = '';
+    for (let i = 0; i < N; i++) pips += `<i${i < t.n ? ' class="on"' : ''}></i>`;
+    body = `<div class="tb-count" aria-live="polite" aria-label="${t.n} of ${N} bounces"><b>${t.n}</b><span>/ ${N}</span></div>
+      <div class="tb-pips" aria-hidden="true">${pips}</div>
+      <p class="tb-text">${t.n ? `Air so far <b class="tb-sofar">${secs(t.air)} s</b>` : 'Waiting for the first take-off…'}</p>
+      <button type="button" class="btn-small btn-outline tb-cancel" data-tbl="cancel">Cancel</button>`;
+  } else {
+    const complete = t.n >= N;
+    body = `${complete ? '' : tbPartialHTML(t.n)}
+      ${tbNumbersHTML(t)}
+      <p class="tb-note">${complete ? (TB.saved ? 'Saved to History › 10 bounce.' : 'Could not be saved on this device.')
+        : `Not saved: a 10 bounce time needs ${N} bounces in one go.`}</p>
+      <div class="tb-actions">
+        <button type="button" class="btn-outline" data-tbl="again">Again</button>
+        <button type="button" class="btn-primary" data-tbl="done">${complete ? 'Done' : 'Close'}</button>
+      </div>`;
+  }
+  card.innerHTML = `${turn ? `<p class="kicker">Turn ${turn.number} · ${esc(turnLabel(turn))}</p>` : ''}
+    <h2 id="tb-title" class="tb-title">10 bounce time</h2>${body}`;
+}
+
+/* ---------- Looking back: the panel under a turn or set's chart ---------- */
+async function renderOverlayTb(run, startIdx) {
+  const box = $('#turn-overlay-tb');
+  if (!run.length) { box.hidden = true; box.innerHTML = ''; return; }
+  const t = tbSums(run);
+  const complete = t.n >= CONFIG.tenBounceCount;
+  const saved = complete && (await DB.byIndex('tenBounce', 'setId', run[0].setId)).some((r) => r.startJumpId === run[0].id && r.n === t.n);
+  box.innerHTML = `<div class="tb-panel-head">
+      <h3 class="tb-title">10 bounce time</h3>
+      <span class="tb-range">Jumps ${startIdx + 1}–${startIdx + t.n}</span>
+      <button type="button" class="icon-btn" data-tbv="close" aria-label="Close 10 bounce time"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></button>
+    </div>
+    ${complete ? '' : tbPartialHTML(t.n, ' left in this set')}
+    ${tbNumbersHTML(t)}
+    <div class="tb-actions">${!complete ? '<span class="tb-note">Only a full 10 can be saved.</span>'
+      : saved ? '<span class="tb-saved">✓ Saved to History › 10 bounce</span>'
+      : '<button type="button" class="btn-primary" data-tbv="save">Save</button>'}</div>`;
+  box.hidden = false;
+}
+
+/* ---------- History › 10 bounce ---------- */
+function tbCardHTML(r, setsById, turnsById, sessionsById) {
+  const set = setsById.get(r.setId);
+  const turn = set ? turnsById.get(set.turnId) : null;
+  const session = sessionsById.get(r.sessionId);
+  const who = turn ? turnLabel(turn) : r.jumper || 'Unnamed turn';
+  const where = [session ? session.name : '', turn ? `Turn ${turn.number}` : '', set ? `set ${set.number}` : ''].filter(Boolean).join(' · ');
+  return `<li class="tb-item">
+    <button type="button" class="card-btn tb-rec" data-tb-open="${r.id}">
+      <span class="tb-who">${esc(who)}${r.demo ? ' <span class="pill pill-demo">Demo</span>' : ''}</span>
+      <span class="tb-air">${secs(r.airMs)}<small>s air</small></span>
+      <span class="tb-meta">Total ${secs(r.totalMs)} s · Bed ${secs(r.bedMs)} s</span>
+      <span class="tb-meta">${fmtTime(r.at || r.createdAt)}${where ? ` · ${esc(where)}` : ''}</span>
+    </button>
+    <button type="button" class="icon-btn tb-del" data-tb-del="${r.id}" aria-label="Delete this 10 bounce time"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+  </li>`;
+}
+
+function tbListHTML(tbs, setsById, turnsById, sessionsById) {
+  if (!tbs.length) {
+    return `<div class="empty"><strong>No 10 bounce times yet</strong>Tap “10 bounce time” on the Live screen, or open a turn, tap a jump and choose “See 10 bounce time”.</div>`;
+  }
+  const days = [];
+  for (const r of tbs) {
+    const k = dayKey(r.at || r.createdAt);
+    if (!days.length || days[days.length - 1].key !== k) days.push({ key: k, list: [] });
+    days[days.length - 1].list.push(r);
+  }
+  return days.map((d) => `<h2 class="section-label">${esc(dayLabel(d.key))}</h2>
+    <ul class="list">${d.list.map((r) => tbCardHTML(r, setsById, turnsById, sessionsById)).join('')}</ul>`).join('');
 }
 
 /* ---------- "Who's up?" sheet ----------
@@ -1941,8 +2190,24 @@ function wireEvents() {
   $('#history-content').addEventListener('click', async (e) => {
     const card = e.target.closest('[data-session]');
     if (card) { const id = Number(card.dataset.session); return showView('session', { sessionId: S.session && S.session.id === id ? null : id }); }
+    const tbCard = e.target.closest('[data-tb-open]');
+    if (tbCard) {
+      const rec = await DB.get('tenBounce', Number(tbCard.dataset.tbOpen));
+      const set = rec && (await DB.get('sets', rec.setId));
+      if (!set) { toast('The jumps for this 10 bounce time are gone.'); return; }
+      return openOverlay('turn', set.turnId, { tb: { setId: rec.setId, startJumpId: rec.startJumpId } });
+    }
+    const tbDel = e.target.closest('[data-tb-del]');
+    if (tbDel) {
+      if (await confirmDialog('Delete this 10 bounce time?', 'Only the saved time is removed. The jumps stay in their session.')) {
+        await DB.del('tenBounce', Number(tbDel.dataset.tbDel));
+        renderHistory(); toast('10 bounce time deleted');
+      }
+      return;
+    }
     const btn = e.target.closest('[data-action]');
     if (!btn) return;
+    if (btn.dataset.action === 'htab') { S.historyTab = btn.dataset.htab; return renderHistory(); }
     if (btn.dataset.action === 'csv-all') await exportCsv({}, 'all-sessions');
     if (btn.dataset.action === 'toggle-older') { S.historyOpen = !S.historyOpen; return renderHistory(); }
     if (btn.dataset.action === 'clear-older') {
@@ -2016,9 +2281,34 @@ function wireEvents() {
     }
   });
 
+  // 10 bounce time: the live layer, and the panel on the detail screen
+  $('#tb-btn').addEventListener('click', tbOpen);
+  $('#tb-card').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-tbl]');
+    if (!b) return;
+    if (b.dataset.tbl === 'start') tbStart();
+    else if (b.dataset.tbl === 'again') tbOpen();
+    else tbClose();   // cancel, done
+  });
+  $('#turn-overlay-tb').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-tbv]');
+    if (!b || !S.overlay || !S.tbView) return;
+    if (b.dataset.tbv === 'close') { S.tbView = null; overlayChart.highlight = new Set(); return renderOverlay(); }
+    const data = await getOverlayData(S.overlay.kind, S.overlay.id);
+    if (!data) return;
+    const i = data.list.findIndex((j) => j.id === S.tbView.startJumpId);
+    const run = i < 0 ? [] : tbRun(data.list, i);
+    if (run.length < CONFIG.tenBounceCount) return;
+    b.disabled = true;
+    await tbSave(run, data.turn, 'history');
+    await renderOverlay();
+    toast('Saved to History › 10 bounce');
+  });
+
   // Results
   $('#results-close').addEventListener('click', closeResults);
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !$('#tb-layer').hidden) { tbClose(); return; }
     if (e.key !== 'Escape' || document.querySelector('dialog[open]')) return;
     if (!$('#results').hidden) closeResults();
     else if (S.overlay) closeOverlay();
@@ -2051,7 +2341,14 @@ async function boot() {
   renderDeviceName();
 
   liveChart = new JumpChart($('#live-chart'), { live: true, showSets: true, emptyText: `${LOGO_SVG.replace('wm-logo', 'empty-moon')}<strong>Every jump launches a bar</strong>Striped orange bed time at the bottom, blue air time on top.` });
-  overlayChart = new JumpChart($('#turn-overlay-chart'), { showSets: true, emptyText: '<strong>No jumps</strong>' });
+  overlayChart = new JumpChart($('#turn-overlay-chart'), {
+    showSets: true, emptyText: '<strong>No jumps</strong>',
+    onTenBounce: async (j) => {
+      S.tbView = { setId: j.setId, startJumpId: j.id };
+      await renderOverlay();
+      $('#turn-overlay-tb').scrollIntoView({ block: 'nearest', behavior: reducedMotion() ? 'auto' : 'smooth' });
+    },
+  });
   resultsChart = new JumpChart($('#rc-chart'), { fit: true });
   wireEvents();
 
