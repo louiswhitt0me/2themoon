@@ -877,3 +877,104 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
   .prow { grid-template-columns: 1fr 74px; }
   .pmeta { grid-column: 1 / -1; text-align: left; }
 }
+
+/* =========================================================================
+   HD — horizontal displacement (hd.js). The bed from above, drawn in cm with
+   the FIG red lines, on the Live screen and the labelling screen; and the
+   four-corner panel on the Debug screen.
+   ========================================================================= */
+:root {
+  --hd-red: #FF3B4E;          /* the bed's red lines */
+  --hd-mat: #10163A;          /* the bed itself: darker than the cards, like real webbing */
+  --hd-frame: rgba(92, 184, 255, .28);   /* frame pads, blue as in the FIG drawing */
+}
+#view-live .hd-card { flex: none; min-height: 0; padding: 10px 12px 12px; }
+/* With the bed below it the Live screen scrolls, so the jump chart keeps its
+   natural height instead of being squeezed to fit. */
+#view-live:has(#live-hd:not([hidden])) #live-chart { flex: none; }
+.hd-count { flex: none; padding: 4px 10px; border-radius: 999px; font: 800 14px/1 var(--display); letter-spacing: .06em; text-transform: uppercase; background: var(--card-2); color: var(--text-2); border: 1px solid var(--line); }
+.hd-count.all { color: var(--good); border-color: rgba(61, 220, 151, .55); }
+.hd-card[hidden] { display: none; }
+.hd-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 0 2px 8px; }
+.hd-head .kicker { margin: 0; }
+.hd-title { margin: 2px 0 0; font: 800 22px/1 var(--display); text-transform: uppercase; letter-spacing: .02em; }
+.hd-note { margin: 8px 2px 0; font-size: 13px; line-height: 1.4; color: var(--text-2); }
+.hd-soon { color: var(--moon); font-weight: 600; }
+
+.hd-bed { display: block; width: 100%; height: auto; max-height: 52vh; }
+.hd-bed.tappable { cursor: crosshair; touch-action: manipulation; }
+.hd-frame { fill: var(--hd-frame); }
+.hd-mat { fill: var(--hd-mat); stroke: rgba(176, 192, 255, .35); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.hd-web line { stroke: rgba(176, 192, 255, .07); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.hd-red line { stroke: var(--hd-red); stroke-width: 2.2; vector-effect: non-scaling-stroke; stroke-linecap: square; }
+.hd-corner-dot { fill: var(--card-2); stroke: var(--text-2); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.hd-corner[data-state="on"] .hd-corner-dot { stroke: var(--good); }
+.hd-corner[data-state="wait"] .hd-corner-dot { stroke: var(--warn); stroke-dasharray: 3 3; }
+.hd-corner-dot.has-share { fill: rgba(255, 225, 122, .32); stroke: var(--moon); }
+.hd-corner-num { fill: var(--text); font: 700 15px var(--display); text-anchor: middle; pointer-events: none; }
+.hd-share { fill: var(--moon); font: 800 22px var(--display); text-anchor: middle; pointer-events: none; }
+.hd-marker circle { fill: rgba(255, 225, 122, .25); stroke: var(--moon); stroke-width: 2.5; vector-effect: non-scaling-stroke; }
+.hd-marker line { stroke: var(--moon); stroke-width: 2; vector-effect: non-scaling-stroke; }
+
+/* ---- Debug: the switch ---- */
+.hd-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.hd-switch-row strong { display: block; font: 800 17px/1.1 var(--display); text-transform: uppercase; letter-spacing: .03em; color: var(--moon); }
+.hd-switch-row .dim { display: block; color: var(--text-2); font-size: 12.5px; line-height: 1.35; margin-top: 3px; }
+.switch {
+  flex: none; position: relative; width: 56px; height: 32px; border-radius: 999px;
+  background: var(--card-2); border: 1px solid rgba(243, 245, 255, .45); padding: 0; cursor: pointer;
+  transition: background .15s ease;
+}
+.switch-knob {
+  position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%;
+  background: var(--text-2); transition: transform .15s ease, background .15s ease;
+}
+.switch[aria-checked="true"] { background: var(--moon); border-color: var(--moon); }
+.switch[aria-checked="true"] .switch-knob { transform: translateX(24px); background: var(--on-light); }
+@media (prefers-reduced-motion: reduce) { .switch, .switch-knob { transition: none; } }
+#hd-panel[hidden] { display: none; }
+.hd-sub { margin: 16px 0 0; font: 800 13px/1 var(--display); text-transform: uppercase; letter-spacing: .05em; color: var(--text-2); }
+
+/* ---- Debug: the four corners, laid out like the bed ---- */
+.hd-boards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+.hd-slot {
+  min-width: 0; padding: 8px; border-radius: var(--radius-sm);
+  background: var(--card-2); border: 1px solid var(--line); box-shadow: inset 3px 0 0 var(--text-2);
+  font-size: 12.5px;
+}
+.hd-slot[data-state="on"] { box-shadow: inset 3px 0 0 var(--good); }
+.hd-slot-head { display: flex; align-items: center; gap: 6px; }
+.hd-slot-num {
+  flex: none; width: 22px; height: 22px; border-radius: 50%; display: inline-grid; place-items: center;
+  background: var(--card-solid); font: 800 14px/1 var(--display); color: var(--text);
+}
+.hd-slot-where { font: 700 13px/1 var(--display); text-transform: uppercase; letter-spacing: .05em; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hd-slot-head .pill { margin-left: auto; }
+.hd-slot-name { margin-top: 6px; font: 600 14px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.hd-slot-state { color: var(--text-2); margin-top: 2px; }
+.hd-slot-mount { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 6px; color: var(--text-2); }
+.hd-slot-mount label { display: inline-flex; align-items: center; gap: 4px; }
+.hd-slot-mount input, .hd-slot-mount select, .hd-xy input {
+  min-height: 32px; padding: 0 6px; background: var(--card-solid); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; font: 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.hd-slot-mount input { width: 52px; }
+.hd-slot-mount select { min-width: 0; max-width: 100%; }
+.hd-slot-btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.hd-slot-btns .btn-small { flex: 1 1 auto; min-height: 32px; padding: 0 8px; font-size: 13px; }
+
+/* ---- Debug: labelling ---- */
+.hd-label { margin-top: 12px; padding: 10px; border-radius: var(--radius-sm); background: var(--card-solid); border: 1px solid rgba(255, 225, 122, .45); }
+.hd-label[hidden] { display: none; }
+.hd-label-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.hd-label-head .dim { margin: 0; flex: 1; }
+.hd-label-head .btn-small { min-height: 32px; padding: 0 12px; font-size: 13px; }
+.hd-xy { display: flex; align-items: center; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
+.hd-xy label { display: inline-flex; align-items: center; gap: 6px; font: 700 14px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.hd-xy input { width: 80px; min-height: 40px; text-align: right; }
+.hd-xy .btn-small { min-height: 40px; }
+.hd-table { width: 100%; margin-top: 10px; border-collapse: collapse; font: 12px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.hd-table th { text-align: right; font-weight: 600; color: var(--text-2); padding: 3px 4px; border-bottom: 1px solid var(--line); }
+.hd-table td { text-align: right; padding: 3px 4px; font-variant-numeric: tabular-nums; }
+.hd-table th:first-child, .hd-table td:first-child { text-align: left; }
+.hd-table .dim { text-align: left; }

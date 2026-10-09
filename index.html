@@ -10,12 +10,16 @@
   <title>2themoon</title>
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="styles.css?v=20261007">
-  <script src="app.js?v=20261007" defer></script>
+  <link rel="stylesheet" href="styles.css?v=20261009">
+  <script src="app.js?v=20261009" defer></script>
   <!-- Debug tools: the scope, the serial monitor and the tuning panel. Loaded
        after app.js (defer keeps the order) and optional — app.js guards every
        call into it, so a failure here never stops jumps being recorded. -->
-  <script src="debug.js?v=20261007" defer></script>
+  <script src="debug.js?v=20261009" defer></script>
+  <!-- HD (horizontal displacement): four-corner data collection. Needs
+       debug.js, sits behind the HD switch on the Debug screen, and app.js
+       guards every call into it. -->
+  <script src="hd.js?v=20261009" defer></script>
 </head>
 <body>
   <div class="sky" aria-hidden="true"><div class="twinkle"></div><div class="moon"></div><div class="horizon"></div></div>
@@ -78,6 +82,9 @@
 
       <div id="live-stats" class="stats"></div>
       <div id="live-chart" class="chart-card"></div>
+      <!-- HD: the bed from above with the FIG red lines and each corner's share
+           of the last landing. Only while Debug -> HD is on; hd.js draws it. -->
+      <section id="live-hd" class="chart-card hd-card" hidden aria-label="Horizontal displacement"></section>
       <!-- Competition-style time of flight: the next 10 bounces added up. Shown
            while a sensor (or the demo) is sending; app.js drives #tb-layer. -->
       <button type="button" id="tb-btn" class="btn-primary btn-huge tb-btn" hidden>10 bounce time</button>
@@ -104,6 +111,31 @@
         </div>
         <div class="turn-head-actions">
           <button type="button" class="btn-small" data-dbg="off">Hide</button>
+        </div>
+      </div>
+
+      <!-- ---- HD (horizontal displacement): a board on a spring at each corner
+                of the bed, recorded together so the landing position can be
+                modelled later. Everything here is driven by hd.js. ---- -->
+      <div class="dbg-card hd-switch-card">
+        <div class="hd-switch-row">
+          <div>
+            <strong id="hd-switch-label">HD &middot; horizontal displacement</strong>
+            <span class="dim">Record all four corners on every landing, to model where on the bed it was.</span>
+          </div>
+          <button type="button" id="hd-switch" class="switch" role="switch" aria-checked="false" aria-labelledby="hd-switch-label"><span class="switch-knob"></span></button>
+        </div>
+        <div id="hd-panel" hidden>
+          <p class="dim">Corner 1 is top left on the Live drawing, then clockwise. The main sensor (Connect sensor on Live) can be any corner and still feeds the jump bars; connect the other three here. Note which spring each board is on.</p>
+          <div id="hd-boards" class="hd-boards"></div>
+          <div class="dbg-row">
+            <button type="button" id="hd-rec" class="btn-small" data-hd="rec">Start recording</button>
+          </div>
+          <p id="hd-status" class="scope-status"></p>
+          <div id="hd-label" class="hd-label" hidden></div>
+          <h3 class="hd-sub">Recordings</h3>
+          <div id="hd-runs" class="dbg-captures"></div>
+          <p class="dim">CSV gives two files: <b>landings</b> (one row per landing, with blank <code>x_cm</code>/<code>y_cm</code> to fill in) and <b>signals</b> (each corner&rsquo;s raw and filtered samples round the landing).</p>
         </div>
       </div>
 

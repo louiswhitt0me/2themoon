@@ -86,7 +86,7 @@ const CONFIG = {
 
   // --- Storage --------------------------------------------------------------
   dbName: 'trampoline-sensor-v1',
-  dbVersion: 4,
+  dbVersion: 5,
 };
 
 /* ==========================================================================
@@ -341,6 +341,13 @@ const DB = {
           const tb = db.createObjectStore('tenBounce', { keyPath: 'id', autoIncrement: true });
           tb.createIndex('sessionId', 'sessionId');
           tb.createIndex('setId', 'setId');
+        }
+        // v5 adds HD (horizontal displacement) recordings from the four corner
+        // boards (hd.js): a run per recording, a row per landing with each
+        // corner's signal window and, once labelled, where it really landed.
+        if (e.oldVersion < 5 && !db.objectStoreNames.contains('hdRuns')) {
+          db.createObjectStore('hdRuns', { keyPath: 'id', autoIncrement: true }).createIndex('startedAt', 'startedAt');
+          db.createObjectStore('hdJumps', { keyPath: 'id', autoIncrement: true }).createIndex('runId', 'runId');
         }
       };
       req.onsuccess = () => { this.db = req.result; resolve(); };
@@ -774,6 +781,8 @@ function ingestLine(line) {
   // The debug screen is a serial monitor: it sees every line, parsed or not,
   // before anything decides to drop it. Guarded because debug.js is optional.
   if (typeof Debug !== 'undefined') { try { Debug.line(line, p); } catch (e) { console.warn('[debug]', e); } }
+  // HD: the main sensor is one of the four corners. Guarded like Debug.
+  if (typeof HD !== 'undefined') { try { HD.mainLine(line, p); } catch (e) { console.warn('[hd]', e); } }
   if (!p) { console.warn('[sensor] ignored packet that failed to parse:', JSON.stringify(line)); return; }
   if (p.kind === 'jump') enqueue(() => handleJump(p));
   else if (p.kind === 'idle') enqueue(() => handleIdle());
@@ -1412,6 +1421,9 @@ function renderConnection() {
   const batLabel = bat ? ` Battery ${bat.detail}.` : '';
   const spoken = state === 'connected' ? `${deviceName()} connected` : label;
   el.setAttribute('aria-label', connected ? `${spoken}.${batLabel} Tap for sensor settings.` : `${spoken}.${batLabel}`);
+
+  // The main sensor is one of HD's four corners, so its connection shows there too.
+  if (typeof HD !== 'undefined' && HD.ready) { HD.renderBoards(); HD.renderStatus(); HD.renderLive(); }
 }
 
 /* ---------- Time precision (1, 2 or 3 decimals) ----------
@@ -1631,6 +1643,7 @@ function showView(view, { sessionId = null } = {}) {
   if (view === 'session') renderSession();
   if (view === 'history') renderHistory();
   if (view === 'debug' && typeof Debug !== 'undefined') { Debug.render(); Debug.renderCaptures(); }
+  if (view === 'debug' && typeof HD !== 'undefined') HD.render();
 }
 
 /* ---------- Turn / set detail overlay ---------- */
@@ -2381,6 +2394,7 @@ async function boot() {
 
   // Reload-safe demo: carry on simulating into the same demo session.
   if (typeof Debug !== 'undefined') Debug.init();
+  if (typeof HD !== 'undefined') { try { HD.init(); } catch (e) { console.warn('[hd] init failed', e); } }
 
   if (await DB.meta('demoActive')) await startDemo({ resume: true });
 

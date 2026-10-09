@@ -185,6 +185,7 @@ const Debug = {
     const tab = document.querySelector('.tab[data-tab="debug"]');
     if (tab) tab.hidden = !on;
     if (!on && typeof S !== 'undefined' && S.view === 'debug') showView('live');
+    if (typeof HD !== 'undefined' && HD.ready) HD.applyVisibility();   // HD lives behind the debug tools
     if (!quiet) toast(on ? 'Debug tools on' : 'Debug tools off');
   },
 
