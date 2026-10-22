@@ -82,6 +82,8 @@
 
       <div id="live-stats" class="stats"></div>
       <div id="live-chart" class="chart-card"></div>
+      <!-- A 10 bounce time picked from a jump on this chart; see renderTbPanel(). -->
+      <div id="live-tb" class="tb-panel" hidden aria-live="polite"></div>
       <!-- HD: the bed from above with the FIG red lines and each corner's share
            of the last landing. Only while Debug -> HD is on; hd.js draws it. -->
       <section id="live-hd" class="chart-card hd-card" hidden aria-label="Horizontal displacement"></section>
@@ -270,7 +272,7 @@
       </div>
       <div id="turn-overlay-stats" class="stats"></div>
       <div id="turn-overlay-chart" class="chart-card"></div>
-      <!-- A 10 bounce time picked from a jump on this chart; see renderOverlayTb(). -->
+      <!-- A 10 bounce time picked from a jump on this chart; see renderTbPanel(). -->
       <div id="turn-overlay-tb" class="tb-panel" hidden aria-live="polite"></div>
       <!-- Buttons depend on whether a turn or one of its sets is open; see renderOverlay(). -->
       <div id="turn-overlay-actions" class="action-row"></div>

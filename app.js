@@ -404,6 +404,7 @@ const S = {
   historyOpen: false,     // is the "Previous sessions" group expanded?
   historyTab: 'sessions', // History screen: 'sessions' or 'tb' (saved 10 bounce times)
   tbView: null,           // { setId, startJumpId } — the 10 bounce run shown on the detail screen
+  liveTb: null,           // { setId, startJumpId } — the 10 bounce run picked from the Live chart
   precision: DEFAULT_PRECISION,   // decimals on every time shown, 1-3 (kept in meta)
   demo: null,
 };
@@ -1449,6 +1450,7 @@ function renderLive({ newJump = false } = {}) {
   const kicker = $('#live-kicker'), title = $('#live-title');
   const nameBtn = $('#live-name-btn');
 
+  if (turnChanged) S.liveTb = null;   // a different jumper is on: drop the old pick
   if (!turn) {
     kicker.innerHTML = S.session ? esc(S.session.name) : '';
     title.textContent = S.session ? 'Waiting for first jump' : 'Ready for liftoff';
@@ -1464,8 +1466,17 @@ function renderLive({ newJump = false } = {}) {
   nameBtn.classList.toggle('unnamed', !!turn && !turn.jumper);
   $('#next-jumper-btn').hidden = !S.openTurn;
   $('#live-stats').innerHTML = statsHTML(jumps);
-  liveChart.highlight = new Set(TB.jumps.map((j) => j.id));   // the bounces being counted
+  // A run picked from the chart ("See 10 bounce time").
+  let run = [], startIdx = -1;
+  if (S.liveTb) {
+    startIdx = jumps.findIndex((j) => j.id === S.liveTb.startJumpId);
+    if (startIdx < 0) S.liveTb = null;
+    else run = tbRun(jumps, startIdx);
+  }
+  // A live count takes the highlight; otherwise the run picked from the chart.
+  liveChart.highlight = new Set((TB.jumps.length ? TB.jumps : run).map((j) => j.id));
   liveChart.setJumps(jumps, { animate: newJump && !turnChanged, resetView: turnChanged });
+  renderTbPanel($('#live-tb'), run, startIdx);
 }
 
 function sparkHTML(jumps) {
@@ -1718,7 +1729,7 @@ async function renderOverlay(first = false) {
   overlayChart.highlight = new Set(run.map((j) => j.id));
   overlayChart.setJumps(list, { resetView: first, animate: !first });
   if (first && startIdx >= 0) { overlayChart.select(startIdx); overlayChart.reveal(startIdx); }
-  await renderOverlayTb(run, startIdx);
+  await renderTbPanel($('#turn-overlay-tb'), run, startIdx);
   if (S.overlay !== showing) return;
 
   const setIndex = isTurn ? -1 : sets.findIndex((s) => s.id === set.id);
@@ -1903,13 +1914,14 @@ function renderTenBounce() {
     <h2 id="tb-title" class="tb-title">10 bounce time</h2>${body}`;
 }
 
-/* ---------- Looking back: the panel under a turn or set's chart ---------- */
-async function renderOverlayTb(run, startIdx) {
-  const box = $('#turn-overlay-tb');
+/* ---------- Looking back: the panel under a chart (Live, or a turn or set) ---------- */
+async function renderTbPanel(box, run, startIdx) {
+  const seq = box.tbSeq = (box.tbSeq || 0) + 1;   // a newer render wins over one still waiting on the DB
   if (!run.length) { box.hidden = true; box.innerHTML = ''; return; }
   const t = tbSums(run);
   const complete = t.n >= CONFIG.tenBounceCount;
   const saved = complete && (await DB.byIndex('tenBounce', 'setId', run[0].setId)).some((r) => r.startJumpId === run[0].id && r.n === t.n);
+  if (seq !== box.tbSeq) return;
   box.innerHTML = `<div class="tb-panel-head">
       <h3 class="tb-title">10 bounce time</h3>
       <span class="tb-range">Jumps ${startIdx + 1}–${startIdx + t.n}</span>
@@ -2303,6 +2315,20 @@ function wireEvents() {
     else if (b.dataset.tbl === 'again') tbOpen();
     else tbClose();   // cancel, done
   });
+  $('#live-tb').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-tbv]');
+    if (!b || !S.liveTb) return;
+    if (b.dataset.tbv === 'close') { S.liveTb = null; return renderLive({}); }
+    const turn = S.openTurn || S.turns[S.turns.length - 1] || null;
+    const list = turn ? jumpsOfTurn(turn.id) : [];
+    const i = list.findIndex((j) => j.id === S.liveTb.startJumpId);
+    const run = i < 0 ? [] : tbRun(list, i);
+    if (run.length < CONFIG.tenBounceCount) return;
+    b.disabled = true;
+    await tbSave(run, turn, 'history');
+    renderLive({});
+    toast('Saved to History › 10 bounce');
+  });
   $('#turn-overlay-tb').addEventListener('click', async (e) => {
     const b = e.target.closest('[data-tbv]');
     if (!b || !S.overlay || !S.tbView) return;
@@ -2353,7 +2379,15 @@ async function boot() {
   $$('[data-wordmark]').forEach((el) => { el.innerHTML = wordmarkHTML(); });
   renderDeviceName();
 
-  liveChart = new JumpChart($('#live-chart'), { live: true, showSets: true, emptyText: `${LOGO_SVG.replace('wm-logo', 'empty-moon')}<strong>Every jump launches a bar</strong>Striped orange bed time at the bottom, blue air time on top.` });
+  liveChart = new JumpChart($('#live-chart'), {
+    live: true, showSets: true,
+    emptyText: `${LOGO_SVG.replace('wm-logo', 'empty-moon')}<strong>Every jump launches a bar</strong>Striped orange bed time at the bottom, blue air time on top.`,
+    onTenBounce: (j) => {
+      S.liveTb = { setId: j.setId, startJumpId: j.id };
+      renderLive({});
+      $('#live-tb').scrollIntoView({ block: 'nearest', behavior: reducedMotion() ? 'auto' : 'smooth' });
+    },
+  });
   overlayChart = new JumpChart($('#turn-overlay-chart'), {
     showSets: true, emptyText: '<strong>No jumps</strong>',
     onTenBounce: async (j) => {
