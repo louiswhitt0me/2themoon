@@ -28,6 +28,7 @@ const CONFIG = {
   idleState: 'REST',      // ...whose toState is REST means "trampoline went quiet" = end of turn
   deviceNameType: 'N',    // N,<name>  — the sensor reporting its own advertised BLE name
   batteryType: 'B',       // B,batMv,usb,charging — every 30 s, on any change, and on "p"
+  clockType: 'Z',         // Z,seq,rxMs,txMs,itvlMs — answer to a "z seq" clock ping (sync.js)
 
   // --- Battery (firmware: config.h). A single-cell LiPo read through a divider. --
   batteryLowMv: 3550,     // BAT_LOW_MV: the sensor's LED starts its low-battery blink here
@@ -97,6 +98,8 @@ const CONFIG = {
      { kind: 'idle', type }
      { kind: 'name', type, name }   // the sensor's advertised BLE name
      { kind: 'battery', type, mv, usb, charging }   // mv 0 = no reading
+     { kind: 'clock', type, seq, rx, tx, itvl }  // a clock ping's answer, ms on the timestampMs clock;
+                                                 // itvl = BLE connection interval (ms) or null
      { kind: 'ignore', type }       // valid line we don't use (C, X, E, R, #, other S)
      null                           // could not parse — caller logs and drops it
    ========================================================================== */
@@ -137,6 +140,14 @@ function parsePacket(line) {
     const mv = Number(f[1]);
     if (f[1] === '' || !Number.isFinite(mv) || mv < 0 || mv > 6000) return null;
     return { kind: 'battery', type, mv, usb: f[2] === '1', charging: f[3] === '1' };
+  }
+
+  if (type === CONFIG.clockType) {
+    if (f.length < 4) return null;
+    const seq = Number(f[1]), rx = Number(f[2]), tx = Number(f[3]);
+    if (![seq, rx, tx].every(Number.isFinite) || f[2] === '' || f[3] === '') return null;
+    const itvl = f[4] ? Number(f[4]) : NaN;   // BLE connection interval, ms (newer firmware)
+    return { kind: 'clock', type, seq, rx, tx, itvl: Number.isFinite(itvl) ? itvl : null };
   }
 
   // --- Debug / tuning lines. None of these touch the recording pipeline:
@@ -784,6 +795,8 @@ function ingestLine(line) {
   if (typeof Debug !== 'undefined') { try { Debug.line(line, p); } catch (e) { console.warn('[debug]', e); } }
   // HD: the main sensor is one of the four corners. Guarded like Debug.
   if (typeof HD !== 'undefined') { try { HD.mainLine(line, p); } catch (e) { console.warn('[hd]', e); } }
+  // Synchro: the main sensor can be one of the two trampolines. Guarded like Debug.
+  if (typeof Sync !== 'undefined') { try { Sync.mainLine(line, p); } catch (e) { console.warn('[sync]', e); } }
   if (!p) { console.warn('[sensor] ignored packet that failed to parse:', JSON.stringify(line)); return; }
   if (p.kind === 'jump') enqueue(() => handleJump(p));
   else if (p.kind === 'idle') enqueue(() => handleIdle());
@@ -856,6 +869,14 @@ document.addEventListener('visibilitychange', () => { if (Wake.wanted && documen
 /* ==========================================================================
    Bluetooth
    ========================================================================== */
+/** When a notification arrived, on performance.now()'s clock. The event's own
+    stamp is earlier than any handler can run; use it when it is on that clock. */
+function rxTime(e) {
+  const now = performance.now();
+  const t = e && e.timeStamp;
+  return Number.isFinite(t) && t > 0 && t <= now && now - t < 1000 ? t : now;
+}
+
 const BLE = {
   device: null, tx: null, rx: null,
   state: 'idle',           // idle | connecting | connected | reconnecting | lost
@@ -943,6 +964,7 @@ const BLE = {
   },
 
   onValue: (e) => {
+    BLE.rxAt = rxTime(e);   // for Synchro's clock pings
     const text = BLE.decoder.decode(e.target.value, { stream: true });
     feedText(text);
   },
@@ -1425,6 +1447,8 @@ function renderConnection() {
 
   // The main sensor is one of HD's four corners, so its connection shows there too.
   if (typeof HD !== 'undefined' && HD.ready) { HD.renderBoards(); HD.renderStatus(); HD.renderLive(); }
+  // ...and can be one of Synchro's two trampolines.
+  if (typeof Sync !== 'undefined' && Sync.ready) Sync.render();
 }
 
 /* ---------- Time precision (1, 2 or 3 decimals) ----------
@@ -1438,6 +1462,7 @@ async function setPrecision(dp) {
   S.precision = dp;
   renderPrecision();
   renderAfterData();
+  if (typeof Sync !== 'undefined' && Sync.ready) Sync.render();   // air and bed times there too
   try { await DB.setMeta('precision', dp); } catch (e) { console.info('[app] could not save precision', e); }
 }
 
@@ -1647,12 +1672,13 @@ async function renderHistory() {
 function showView(view, { sessionId = null } = {}) {
   S.view = view;
   if (view === 'session') S.viewSessionId = sessionId;
-  for (const v of ['live', 'session', 'history', 'debug']) $(`#view-${v}`).hidden = v !== view;
+  for (const v of ['live', 'session', 'history', 'sync', 'debug']) $(`#view-${v}`).hidden = v !== view;
   $$('.tab').forEach((t) => (t.dataset.tab === view ? t.setAttribute('aria-current', 'page') : t.removeAttribute('aria-current')));
   $('main').scrollTop = 0;
   if (view === 'live') renderLive({});
   if (view === 'session') renderSession();
   if (view === 'history') renderHistory();
+  if (view === 'sync' && typeof Sync !== 'undefined') Sync.render();
   if (view === 'debug' && typeof Debug !== 'undefined') { Debug.render(); Debug.renderCaptures(); }
   if (view === 'debug' && typeof HD !== 'undefined') HD.render();
 }
@@ -2429,6 +2455,7 @@ async function boot() {
   // Reload-safe demo: carry on simulating into the same demo session.
   if (typeof Debug !== 'undefined') Debug.init();
   if (typeof HD !== 'undefined') { try { HD.init(); } catch (e) { console.warn('[hd] init failed', e); } }
+  if (typeof Sync !== 'undefined') { try { Sync.init(); } catch (e) { console.warn('[sync] init failed', e); } }
 
   if (await DB.meta('demoActive')) await startDemo({ resume: true });
 

@@ -10,16 +10,19 @@
   <title>2themoon</title>
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="styles.css?v=20261009">
-  <script src="app.js?v=20261009" defer></script>
+  <link rel="stylesheet" href="styles.css?v=20261025c">
+  <script src="app.js?v=20261025c" defer></script>
   <!-- Debug tools: the scope, the serial monitor and the tuning panel. Loaded
        after app.js (defer keeps the order) and optional — app.js guards every
        call into it, so a failure here never stops jumps being recorded. -->
-  <script src="debug.js?v=20261009" defer></script>
+  <script src="debug.js?v=20261025c" defer></script>
   <!-- HD (horizontal displacement): four-corner data collection. Needs
        debug.js, sits behind the HD switch on the Debug screen, and app.js
        guards every call into it. -->
-  <script src="hd.js?v=20261009" defer></script>
+  <script src="hd.js?v=20261025c" defer></script>
+  <!-- Synchro: two sensors, two trampolines, how far apart the landings were.
+       Has its own tab; app.js guards every call into it. -->
+  <script src="sync.js?v=20261025c" defer></script>
 </head>
 <body>
   <div class="sky" aria-hidden="true"><div class="twinkle"></div><div class="moon"></div><div class="horizon"></div></div>
@@ -100,6 +103,41 @@
     <!-- ============ HISTORY ============ -->
     <section id="view-history" class="view" hidden aria-labelledby="history-title">
       <div id="history-content"></div>
+    </section>
+
+    <!-- ============ SYNCHRO ============
+         One sensor on each of two trampolines side by side: each jumper's air
+         and bed time, and how far apart their landings were. Driven by sync.js. -->
+    <section id="view-sync" class="view" hidden aria-labelledby="sync-title">
+      <div class="turn-head">
+        <div class="turn-head-text">
+          <p class="kicker">Two trampolines</p>
+          <h1 id="sync-title" class="turn-title">Synchro</h1>
+        </div>
+        <div class="turn-head-actions">
+          <button type="button" class="btn-small btn-swap" data-sync="resync">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Resync
+          </button>
+        </div>
+      </div>
+
+      <!-- Left and Right: the sensor on each bed, and that jumper's last jump. -->
+      <div id="sync-boards" class="hd-boards sync-boards"></div>
+
+      <!-- The last landing gap, big, with the recent ones as bars. -->
+      <section id="sync-now" class="chart-card hd-card sync-card" aria-live="polite" aria-label="Landing gap"></section>
+
+      <div class="dbg-card">
+        <h2 class="hd-sub sync-sub">Jumps</h2>
+        <div id="sync-pairs"></div>
+        <div class="dbg-row">
+          <button type="button" class="btn-small" data-sync="csv">CSV</button>
+          <button type="button" class="btn-small btn-outline" data-sync="clear">Clear all</button>
+        </div>
+        <p class="dim">Out of synch? Press <b>Resync</b>, stop, and start again together: the next landing on each bed is jump&nbsp;1. Earlier runs stay below until you leave the page.</p>
+      </div>
+      <div id="sync-runs"></div>
     </section>
 
     <!-- ============ DEBUG ============
@@ -230,6 +268,10 @@
     <button type="button" class="tab" data-tab="history">
       <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M12 7v5l3 2" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
       <span>History</span>
+    </button>
+    <button type="button" class="tab" data-tab="sync">
+      <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="7" cy="5" r="2.6"/><circle cx="17" cy="5" r="2.6"/><path d="M7 10v5M17 10v5M2 20h9M13 20h9" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+      <span>Synchro</span>
     </button>
     <!-- Shown only when the debug tools are switched on; debug.js unhides it. -->
     <button type="button" class="tab" data-tab="debug" hidden>

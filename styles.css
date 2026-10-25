@@ -978,3 +978,43 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
 .hd-table td { text-align: right; padding: 3px 4px; font-variant-numeric: tabular-nums; }
 .hd-table th:first-child, .hd-table td:first-child { text-align: left; }
 .hd-table .dim { text-align: left; }
+
+/* =========================================================================
+   Synchro (sync.js): two trampolines, the gap between the landings.
+   Left in sky blue, Right in moon yellow, and always named in words too.
+   ========================================================================= */
+.sync-card[hidden] { display: none; }
+.sync-wait { margin: 6px 2px 4px; color: var(--text-2); font-size: 14px; }
+.sync-big { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; padding: 2px 2px 8px; }
+.sync-num { font: 800 italic 52px/1 var(--display); font-variant-numeric: tabular-nums; color: var(--good); }
+.sync-big[data-who="L"] .sync-num { color: var(--air); }
+.sync-big[data-who="R"] .sync-num { color: var(--moon); }
+.sync-who { font: 700 18px/1.1 var(--display); text-transform: uppercase; letter-spacing: .04em; }
+.sync-pm { color: var(--text-2); font: 600 13px/1 var(--body); text-transform: none; letter-spacing: 0; }
+.sync-axis { display: flex; justify-content: space-between; font: 700 11px/1 var(--display); text-transform: uppercase; letter-spacing: .05em; color: var(--text-2); padding: 0 34px 4px 22px; }
+.sync-list { display: grid; gap: 3px; }
+.sync-row { display: grid; grid-template-columns: 18px 1fr 30px; align-items: center; gap: 4px; font: 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text-2); }
+.sync-v { text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }
+.sync-track { position: relative; height: 10px; border-radius: 5px; background: var(--card-2); }
+.sync-track::after { content: ""; position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: var(--text-2); }
+.sync-bar { position: absolute; top: 0; bottom: 0; border-radius: 5px; min-width: 2px; }
+.sync-bar[data-who="L"] { background: var(--air); }
+.sync-bar[data-who="R"] { background: var(--moon); }
+/* ---- the Synchro tab ---- */
+.sync-boards { margin-top: 0; }
+.sync-slot[data-who="L"] .hd-slot-num { color: var(--air); }
+.sync-slot[data-who="R"] .hd-slot-num { color: var(--moon); }
+/* Each jumper's last jump: air and bed time, big enough to read from the bed. */
+.sync-times { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+.sync-times > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sync-t { font: 800 italic 30px/1 var(--display); font-variant-numeric: tabular-nums; color: var(--air-ink); }
+.sync-t-bed { color: var(--bed-ink); }
+.sync-tl { font: 700 11px/1 var(--display); text-transform: uppercase; letter-spacing: .05em; color: var(--text-2); }
+.sync-sub { margin-top: 0; }
+.sync-table { font-size: 13px; }
+.sync-table th .dim { font-weight: 500; }
+.sync-table td[data-who] { white-space: nowrap; }
+.sync-air { color: var(--air-ink); }
+.sync-table .dim { color: var(--text-2); }
+.sync-run summary { cursor: pointer; font-size: 14px; color: var(--text); }
+.sync-run[open] summary { margin-bottom: 4px; }
