@@ -1018,3 +1018,22 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
 .sync-table .dim { color: var(--text-2); }
 .sync-run summary { cursor: pointer; font-size: 14px; color: var(--text); }
 .sync-run[open] summary { margin-bottom: 4px; }
+/* Left leads, so the gap is Right's: behind (right of centre) or ahead. */
+.sync-big[data-dir="behind"] .sync-num { color: var(--moon); }
+.sync-big[data-dir="ahead"] .sync-num { color: var(--air); }
+.sync-bar[data-dir="behind"] { background: var(--moon); }
+.sync-bar[data-dir="ahead"] { background: var(--air); }
+.sync-row { grid-template-columns: 22px 1fr 72px; }
+.sync-row .sync-v { white-space: nowrap; }
+.sync-axis { padding: 0 76px 4px 26px; }
+.sync-lead { background: var(--air); color: var(--on-light); }
+.hd-slot-head .pill + .pill { margin-left: 0; }
+/* Each jumper's bar chart: a fixed height, the Synchro tab scrolls. */
+.sync-chart { flex: none; height: 300px; min-height: 0; }
+.sync-chart-title { display: flex; align-items: center; gap: 8px; margin: 4px 0 -4px; }
+.sync-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--air); }
+.sync-dot[data-who="R"] { background: var(--moon); }
+.sync-table tr.sync-slip td { background: rgba(255, 225, 122, .08); }
+.sync-hist { display: flex; flex-direction: column; gap: 10px; }
+.sync-hist .sync-card { min-height: 0; }
+.sync-hist .dbg-card { margin-bottom: 0; }

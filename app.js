@@ -87,7 +87,7 @@ const CONFIG = {
 
   // --- Storage --------------------------------------------------------------
   dbName: 'trampoline-sensor-v1',
-  dbVersion: 5,
+  dbVersion: 6,
 };
 
 /* ==========================================================================
@@ -360,6 +360,11 @@ const DB = {
           db.createObjectStore('hdRuns', { keyPath: 'id', autoIncrement: true }).createIndex('startedAt', 'startedAt');
           db.createObjectStore('hdJumps', { keyPath: 'id', autoIncrement: true }).createIndex('runId', 'runId');
         }
+        // v6 adds saved Synchro runs (sync.js): one record per run, with both
+        // sides' jumps and the landing gap of every pair.
+        if (e.oldVersion < 6 && !db.objectStoreNames.contains('syncRuns')) {
+          db.createObjectStore('syncRuns', { keyPath: 'id', autoIncrement: true }).createIndex('startedAt', 'startedAt');
+        }
       };
       req.onsuccess = () => { this.db = req.result; resolve(); };
       req.onerror = () => reject(req.error);
@@ -413,7 +418,7 @@ const S = {
   nameSheet: null,        // { mode: 'next' | 'current', summary } while the name sheet is up
   overlay: null,          // { kind: 'turn' | 'set', id } while the detail screen is up
   historyOpen: false,     // is the "Previous sessions" group expanded?
-  historyTab: 'sessions', // History screen: 'sessions' or 'tb' (saved 10 bounce times)
+  historyTab: 'sessions', // History screen: 'sessions', 'tb' (saved 10 bounce times) or 'sync' (saved Synchro runs)
   tbView: null,           // { setId, startJumpId } — the 10 bounce run shown on the detail screen
   liveTb: null,           // { setId, startJumpId } — the 10 bounce run picked from the Live chart
   precision: DEFAULT_PRECISION,   // decimals on every time shown, 1-3 (kept in meta)
@@ -1626,6 +1631,9 @@ async function renderHistory() {
   for (const s of allSets) setCounts.set(s.sessionId, (setCounts.get(s.sessionId) || 0) + 1);
   const tbs = (await DB.all('tenBounce')).sort((a, b) => (b.at || b.createdAt).localeCompare(a.at || a.createdAt));
   const onTb = S.historyTab === 'tb';
+  const hasSync = typeof Sync !== 'undefined' && Sync.ready;
+  const onSync = hasSync && S.historyTab === 'sync';
+  const syncCount = hasSync ? await Sync.historyCount() : 0;
   const hasDemo = sessions.some((s) => s.demo);
   const today = dayKey(new Date().toISOString());
   const todays = sessions.filter((s) => dayKey(s.createdAt) === today);
@@ -1644,10 +1652,11 @@ async function renderHistory() {
     <div class="page-head"><h1 id="history-title" class="page-title">History</h1>
       <p class="page-meta"><span>${sessions.length} session${sessions.length === 1 ? '' : 's'} saved on this device</span>${used != null ? `<span>${fmtBytes(used)} used</span>` : ''}</p></div>
     <div class="seg hist-seg" role="group" aria-label="Show">
-      <button type="button" class="seg-btn" data-action="htab" data-htab="sessions" aria-pressed="${!onTb}">Sessions</button>
+      <button type="button" class="seg-btn" data-action="htab" data-htab="sessions" aria-pressed="${!onTb && !onSync}">Sessions</button>
       <button type="button" class="seg-btn" data-action="htab" data-htab="tb" aria-pressed="${onTb}">10 bounce${tbs.length ? ` <span class="seg-count">${tbs.length}</span>` : ''}</button>
+      ${hasSync ? `<button type="button" class="seg-btn" data-action="htab" data-htab="sync" aria-pressed="${onSync}">Synchro${syncCount ? ` <span class="seg-count">${syncCount}</span>` : ''}</button>` : ''}
     </div>
-    ${onTb ? tbListHTML(tbs, new Map(allSets.map((x) => [x.id, x])), new Map(allTurns.map((x) => [x.id, x])), new Map(sessions.map((x) => [x.id, x]))) : `
+    ${onSync ? '<div id="sync-history" class="sync-history"></div>' : onTb ? tbListHTML(tbs, new Map(allSets.map((x) => [x.id, x])), new Map(allTurns.map((x) => [x.id, x])), new Map(sessions.map((x) => [x.id, x]))) : `
     <div class="toolbar">
       ${sessions.length ? '<button type="button" class="btn-small btn-outline" data-action="csv-all">Export everything (CSV)</button>' : ''}
       ${hasDemo ? '<button type="button" class="btn-small btn-outline btn-danger" data-action="delete-demo">Delete all demo data</button>' : ''}
@@ -1667,6 +1676,7 @@ async function renderHistory() {
       ${S.historyOpen ? days.map((d) => `<h3 class="day-label">${esc(dayLabel(d.key))}</h3>
         <ul class="list">${d.list.map((s) => sessionCardHTML(s, setCounts, turnCounts)).join('')}</ul>`).join('')
         : '<p class="group-hint">Everything from before today. Tap to open.</p>'}` : ''}`}`;
+  if (onSync) await Sync.renderHistory($('#sync-history'));
 }
 
 function showView(view, { sessionId = null } = {}) {
@@ -2239,6 +2249,7 @@ function wireEvents() {
 
   // History screen
   $('#history-content').addEventListener('click', async (e) => {
+    if (typeof Sync !== 'undefined' && Sync.ready && (await Sync.historyClick(e))) return;
     const card = e.target.closest('[data-session]');
     if (card) { const id = Number(card.dataset.session); return showView('session', { sessionId: S.session && S.session.id === id ? null : id }); }
     const tbCard = e.target.closest('[data-tb-open]');

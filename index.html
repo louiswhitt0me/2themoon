@@ -10,19 +10,19 @@
   <title>2themoon</title>
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="styles.css?v=20261025c">
-  <script src="app.js?v=20261025c" defer></script>
+  <link rel="stylesheet" href="styles.css?v=20261025d">
+  <script src="app.js?v=20261025d" defer></script>
   <!-- Debug tools: the scope, the serial monitor and the tuning panel. Loaded
        after app.js (defer keeps the order) and optional — app.js guards every
        call into it, so a failure here never stops jumps being recorded. -->
-  <script src="debug.js?v=20261025c" defer></script>
+  <script src="debug.js?v=20261025d" defer></script>
   <!-- HD (horizontal displacement): four-corner data collection. Needs
        debug.js, sits behind the HD switch on the Debug screen, and app.js
        guards every call into it. -->
-  <script src="hd.js?v=20261025c" defer></script>
+  <script src="hd.js?v=20261025d" defer></script>
   <!-- Synchro: two sensors, two trampolines, how far apart the landings were.
        Has its own tab; app.js guards every call into it. -->
-  <script src="sync.js?v=20261025c" defer></script>
+  <script src="sync.js?v=20261025d" defer></script>
 </head>
 <body>
   <div class="sky" aria-hidden="true"><div class="twinkle"></div><div class="moon"></div><div class="horizon"></div></div>
@@ -128,14 +128,21 @@
       <!-- The last landing gap, big, with the recent ones as bars. -->
       <section id="sync-now" class="chart-card hd-card sync-card" aria-live="polite" aria-label="Landing gap"></section>
 
+      <!-- Each jumper's bars, like Live's: air on top, bed below. -->
+      <h2 class="hd-sub sync-chart-title"><span class="sync-dot" data-who="L"></span>Left trampoline</h2>
+      <div id="sync-chart-L" class="chart-card sync-chart"></div>
+      <h2 class="hd-sub sync-chart-title"><span class="sync-dot" data-who="R"></span>Right trampoline</h2>
+      <div id="sync-chart-R" class="chart-card sync-chart"></div>
+
       <div class="dbg-card">
         <h2 class="hd-sub sync-sub">Jumps</h2>
         <div id="sync-pairs"></div>
         <div class="dbg-row">
+          <button type="button" class="btn-small btn-primary" data-sync="save" disabled>Save to History</button>
           <button type="button" class="btn-small" data-sync="csv">CSV</button>
           <button type="button" class="btn-small btn-outline" data-sync="clear">Clear all</button>
         </div>
-        <p class="dim">Out of synch? Press <b>Resync</b>, stop, and start again together: the next landing on each bed is jump&nbsp;1. Earlier runs stay below until you leave the page.</p>
+        <p class="dim">Left leads: landings are paired by count (Left&rsquo;s 5th with Right&rsquo;s 5th), so any gap shows, even a whole bounce. Out of synch, or a &#9888; missed landing? Press <b>Resync</b>, stop, and start again together: the next landing on each bed is jump&nbsp;1. Runs stay on this screen until you leave the page; <b>Save to History</b> keeps one.</p>
       </div>
       <div id="sync-runs"></div>
     </section>

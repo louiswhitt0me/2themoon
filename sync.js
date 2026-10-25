@@ -6,7 +6,7 @@
    How it hangs together:
    - Two slots, Left and Right. Each is either the main sensor (connected the
      usual way with "Connect sensor", so its jumps still feed the Live bars) or
-     a board connected from the Synchro panel, which only ever feeds Synchro.
+     a board connected from the Synchro tab, which only ever feeds Synchro.
    - Each board's jumps are stamped by its own clock (timestampMs, ms since it
      booted), so the two can only be compared once each clock is tied to the
      phone's. That is the "z" ping (firmware link.h): send "z seq" at t1,
@@ -17,13 +17,17 @@
      so only the quickest replies of the last half-minute are trusted.
    - Older firmware ignores "z" (answers with help text). Then the offset falls
      back to the jumps themselves, as HD does: rougher, and shown as such.
-   - A landing from each side within matchTolMs of each other is one pair.
+   - Pairing is by count, Left leading: after Resync, Left's Nth landing goes
+     with Right's Nth, however far apart they are. So a jumper a whole bounce
+     (or two) behind still shows as "Right 1.52 s behind". The cost: a landing
+     one sensor misses shifts every pair after it, so a gap that suddenly
+     changes by about a bounce is flagged, and Resync puts it right.
    - Resync starts a new run: anything that landed before the button is
-     ignored, so the next landing on each side is jump 1 again. For when the
-     jumpers drift so far apart that landings pair with the wrong bounce.
-     Earlier runs are kept (in memory, until the page is left) for the CSV.
+     ignored, so the next landing on each side is jump 1 again. Runs stay in
+     memory until saved to History (IndexedDB store syncRuns) with Save.
 
-   Its own tab, Synchro. Needs app.js (parsePacket, BLE, CONFIG, S, secs, toast).
+   Its own tab, Synchro, and a Synchro list in History. Needs app.js
+   (parsePacket, BLE, CONFIG, S, DB, JumpChart, secs, toast, confirmDialog).
    ========================================================================== */
 
 const SYNCC = {
@@ -36,10 +40,10 @@ const SYNCC = {
   keepMs: 30000,          // ping results the offset is worked out from
   nearBestMs: 4,          // ...those within this much of the quickest round trip are averaged
   sampleJitterMs: 1.25,   // half a sample period: how far the board's own clock read can be out
-  matchTolMs: 400,        // landings ~1.5 s apart, so this can't pair neighbouring landings
-  waitMs: 4000,           // a landing with no partner by then: the other side missed it
   staleMs: 5000,          // a J this far in the past is a backfill, not a landing just now
-  keep: 200,              // pairs kept for the list
+  dupMs: 150,             // a landing this close to that side's last one is the same landing again
+  slipShare: 0.6,         // gap changing by this share of a bounce in one jump: a landing was likely missed
+  keep: 500,              // pairs kept per run
   togetherMs: 10,         // shown as "together" below this
 };
 
@@ -95,13 +99,14 @@ const Sync = {
   settings: { slots: {} },    // slots[s] = { name } — remembered per browser
   boards: {},                 // slot -> SyncBoard (boards connected from this panel)
   mainBoard: null,            // the main sensor's clock state (no GATT of its own)
-  open: [],                   // landings still waiting for the other side
-  pairs: [],                  // this run's, newest last
-  unpaired: { L: 0, R: 0 },
-  last: { L: null, R: null }, // each side's latest jump this run
-  runs: [],                   // earlier runs: { n, startedAt, pairs, unpaired }
-  startedAt: new Date().toISOString(),
+  run: null,                  // the run on now (see newRun)
+  runs: [],                   // earlier runs this visit, oldest first
+  queue: { L: [], R: [] },    // landings waiting for the other side's landing of the same count
+  lastLand: { L: -Infinity, R: -Infinity },   // phone-clock landing, to drop repeats
   resetAt: 0,                 // phone clock: landings before this belong to the last run
+  jumpId: 0,                  // ids for the charts' jumps
+  charts: {},                 // slot -> JumpChart on the Synchro tab
+  histCharts: [],             // JumpCharts in an open History run
   timer: null,
 
   /* ---------- lifecycle ---------- */
@@ -113,6 +118,11 @@ const Sync = {
     for (const s of SYNC_SLOTS) this.boards[s] = new SyncBoard(s);
     this.mainBoard = new SyncBoard('main');
     delete this.settings.on;   // from when Synchro sat behind a Debug switch
+    this.run = this.newRun();
+    for (const s of SYNC_SLOTS) {
+      const el = document.getElementById(`sync-chart-${s}`);
+      if (el) this.charts[s] = new JumpChart(el, { live: true, emptyText: `<strong>No jumps yet</strong>${SYNC_NAME[s]} trampoline's jumps appear here.` });
+    }
     this.wire();
     this.timer = setInterval(() => this.tick(), 100);
     this.render();
@@ -120,6 +130,18 @@ const Sync = {
 
   save() {
     try { localStorage.setItem(SYNCC.storageKey, JSON.stringify(this.settings)); } catch (e) { /* private mode */ }
+  },
+
+  /** A run: the jumps from one Resync to the next. */
+  newRun() {
+    return {
+      n: this.runs.length + 1,
+      startedAt: new Date().toISOString(),
+      pairs: [],               // newest last
+      jumps: { L: [], R: [] }, // every landing on each side, paired or not, for the bar charts
+      savedId: null,           // its syncRuns id once saved
+      dirty: false,            // jumps since the last save
+    };
   },
 
   /* ---------- which board is where ---------- */
@@ -237,10 +259,10 @@ const Sync = {
       if (b.burstLeft > 0) b.burstLeft--;
       this.ping(b);
     }
-    this.expire(now);
   },
 
-  /* ---------- pairing the two sides' landings ---------- */
+
+  /* ---------- pairing the two sides' landings, by count ---------- */
   onJump(b, j, at) {
     const s = this.slotOf(b);
     if (!s) return;
@@ -253,71 +275,97 @@ const Sync = {
     const landAt = land - o.off;              // phone clock
     if (at - landAt > SYNCC.staleMs) return;  // backfilled, not this bounce
     if (landAt < this.resetAt) return;        // landed before Resync: the last run's
-    this.last[s] = { flightMs: j.flightMs, contactMs: j.contactMs };
-    this.renderBoardsSoon();
-    const m = { slot: s, j, landAt, takeAt: j.timestamp - o.off, err: o.err, rough: o.rough, created: at };
+    if (Math.abs(landAt - this.lastLand[s]) < SYNCC.dupMs) return;   // the same landing sent again
+    this.lastLand[s] = landAt;
 
-    const other = s === 'L' ? 'R' : 'L';
-    let bestI = -1, bestD = Infinity;
-    this.open.forEach((x, i) => {
-      const d = Math.abs(x.landAt - landAt);
-      if (x.slot === other && d <= SYNCC.matchTolMs && d < bestD) { bestI = i; bestD = d; }
-    });
-    if (bestI < 0) { this.open.push(m); return; }
-    const [x] = this.open.splice(bestI, 1);
-    this.addPair(s === 'L' ? m : x, s === 'L' ? x : m);
+    const run = this.run;
+    run.jumps[s].push({ id: ++this.jumpId, index: j.index, flightMs: j.flightMs, contactMs: j.contactMs, peakG: j.peakG, flags: j.flags });
+    run.dirty = true;
+    this.queue[s].push({ j, landAt, takeAt: j.timestamp - o.off, err: o.err, rough: o.rough });
+    while (this.queue.L.length && this.queue.R.length) this.addPair(this.queue.L.shift(), this.queue.R.shift());
+    this.renderBoardsSoon();
+    this.renderCharts();
+    this.renderSaveBtn();
   },
 
   addPair(L, R) {
-    const err = L.err != null && R.err != null ? L.err + R.err : null;
-    this.pairs.push({
-      n: this.pairs.length ? this.pairs[this.pairs.length - 1].n + 1 : 1,
+    const pairs = this.run.pairs;
+    const prev = pairs[pairs.length - 1];
+    const landDiff = R.landAt - L.landAt;     // + = Right behind Left
+    // A gap that moves by most of a bounce in one jump: one sensor missed (or
+    // added) a landing and the count has slipped. Real drift is never that fast.
+    const bounce = L.j.flightMs + L.j.contactMs;
+    const slip = !!prev && Number.isFinite(bounce) && Math.abs(landDiff - prev.landDiff) > SYNCC.slipShare * bounce;
+    pairs.push({
+      n: prev ? prev.n + 1 : 1,
       at: new Date().toISOString(),
-      landDiff: R.landAt - L.landAt,           // + = Right landed later (Left first)
+      landDiff,
       takeDiff: R.takeAt - L.takeAt,
       flightL: L.j.flightMs, flightR: R.j.flightMs,
       contactL: L.j.contactMs, contactR: R.j.contactMs,
-      err, rough: L.rough || R.rough,
+      err: L.err != null && R.err != null ? L.err + R.err : null,
+      rough: L.rough || R.rough,
+      slip,
     });
-    if (this.pairs.length > SYNCC.keep) this.pairs.shift();
+    if (pairs.length > SYNCC.keep) pairs.shift();
     this.renderNow();
     this.renderPairs();
   },
 
-  expire(now) {
-    const before = this.open.length;
-    this.open = this.open.filter((m) => {
-      if (now - m.created < SYNCC.waitMs) return true;
-      this.unpaired[m.slot]++;
-      return false;
-    });
-    if (this.open.length !== before) this.renderNow();
-  },
-
-  /** Start again from jump 1. The run so far, if it has any jumps, is kept. */
+  /** Start again from jump 1. The run so far, if it has any jumps, is kept below. */
   resync() {
-    if (this.pairs.length) {
-      this.runs.push({ n: this.runs.length + 1, startedAt: this.startedAt, pairs: this.pairs, unpaired: this.unpaired });
-    }
+    if (this.run.pairs.length || this.run.jumps.L.length || this.run.jumps.R.length) this.runs.push(this.run);
     this.startNewRun();
     toast('Resynced. Start together: the next landing is jump 1.');
   },
 
   startNewRun() {
-    this.pairs = [];
-    this.open = [];
-    this.unpaired = { L: 0, R: 0 };
-    this.last = { L: null, R: null };
-    this.startedAt = new Date().toISOString();
+    this.run = this.newRun();
+    this.queue = { L: [], R: [] };
     this.resetAt = performance.now();
+    for (const s of SYNC_SLOTS) if (this.charts[s]) this.charts[s].setJumps([], { resetView: true });
     this.render();
   },
 
   async clearAll() {
-    if (!this.pairs.length && !this.runs.length) return;
-    if (!(await confirmDialog('Clear all synchro jumps?', 'This run and every earlier one are removed. Export the CSV first to keep them.', 'Clear'))) return;
+    const unsaved = [...this.runs, this.run].filter((r) => r.pairs.length && (!r.savedId || r.dirty)).length;
+    if (!this.run.pairs.length && !this.runs.length) return;
+    const msg = unsaved
+      ? `This run and every earlier one are removed from this screen. ${unsaved} ${unsaved === 1 ? 'has' : 'have'} not been saved to History.`
+      : 'This run and every earlier one are removed from this screen. Saved runs stay in History.';
+    if (!(await confirmDialog('Clear all synchro jumps?', msg, 'Clear'))) return;
     this.runs = [];
     this.startNewRun();
+  },
+
+  /* ---------- saving to History ---------- */
+  sideName(s) { const n = this.cfg(s).name; return n ? splitDeviceName(n).label : SYNC_NAME[s]; },
+
+  async saveRun(run) {
+    if (!run || !run.pairs.length) { toast('No paired jumps to save yet'); return; }
+    const rec = {
+      startedAt: run.startedAt,
+      savedAt: new Date().toISOString(),
+      names: run.names || (run.names = { L: this.sideName('L'), R: this.sideName('R') }),
+      pairs: run.pairs,
+      jumps: run.jumps,
+    };
+    if (run.savedId != null) rec.id = run.savedId;
+    try {
+      run.savedId = await DB.put('syncRuns', rec);
+      run.dirty = false;
+      toast(rec.id != null ? 'Synchro run updated in History' : 'Synchro run saved to History');
+    } catch (e) {
+      console.warn('[sync] save failed', e);
+      toast("Couldn't save the run");
+    }
+    this.renderSaveBtn();
+    this.renderRuns();
+  },
+
+  saveLabel(run) {
+    if (run.savedId == null) return 'Save to History';
+    return run.dirty ? 'Save changes' : 'Saved ✓';
   },
 
   /* ---------- the extra boards' own connections ---------- */
@@ -430,15 +478,17 @@ const Sync = {
     this.render();
   },
 
+
   /* ---------- words ---------- */
-  /** "Left first by 23 ms" for a landing difference (+ = Left first). */
+  /** Left leads: "Right 23 ms behind", "Right 1.24 s ahead", or together. */
   verdict(d) {
-    const a = Math.abs(d);
-    if (a < SYNCC.togetherMs) return { who: null, text: 'Together' };
-    const who = d > 0 ? 'L' : 'R';
-    return { who, text: `${SYNC_NAME[who]} first` };
+    if (Math.abs(d) < SYNCC.togetherMs) return { dir: null, short: '=', text: 'Together' };
+    return d > 0 ? { dir: 'behind', short: 'behind', text: 'Right behind' } : { dir: 'ahead', short: 'ahead', text: 'Right ahead' };
   },
-  ms(d) { return `${Math.round(Math.abs(d))} ms`; },
+  ms(d) {
+    const a = Math.abs(d);
+    return a < 1000 ? `${Math.round(a)} ms` : `${(a / 1000).toFixed(2)} s`;
+  },
   clockText(b) {
     if (!b) return '';
     if (b.firmware === 'old') return 'Old firmware · rough timing';
@@ -449,29 +499,32 @@ const Sync = {
     // and a phone that won't go that fast shows up here.
     return `Clock synced · ±${o.err.toFixed(1)} ms${b.itvl ? ` · BLE ${Math.round(b.itvl)} ms` : ''}`;
   },
-
   /** Seconds at the app's chosen precision, or a dash. */
   sec(ms) { return Number.isFinite(ms) ? secs(ms) : '–'; },
   meanGap(pairs) { return pairs.length ? pairs.reduce((a, p) => a + Math.abs(p.landDiff), 0) / pairs.length : null; },
 
   /* ---------- the Synchro tab ---------- */
+  onTab() { return this.ready && typeof S !== 'undefined' && S.view === 'sync'; },
+
   render() {
-    if (!this.ready || typeof S === 'undefined' || S.view !== 'sync') return;
+    if (!this.onTab()) return;
     this.renderBoards();
     this.renderNow();
+    this.renderCharts(true);
     this.renderPairs();
+    this.renderSaveBtn();
     this.renderRuns();
   },
 
   renderBoardsSoon() {
     if (this.boardsTimer) return;
-    this.boardsTimer = setTimeout(() => { this.boardsTimer = null; if (S.view === 'sync') this.renderBoards(); }, 250);
+    this.boardsTimer = setTimeout(() => { this.boardsTimer = null; this.renderBoards(); }, 250);
   },
 
   /** Left and Right: which sensor, its clock, and that jumper's last jump. */
   renderBoards() {
     const el = document.getElementById('sync-boards');
-    if (!el || S.view !== 'sync') return;
+    if (!el || !this.onTab()) return;
     const mainS = this.mainSlot();
     el.innerHTML = SYNC_SLOTS.map((s) => {
       const cfg = this.cfg(s), b = this.boards[s];
@@ -491,10 +544,10 @@ const Sync = {
           : `<button type="button" class="btn-small" data-sync="connect" data-s="${s}">Connect</button>`;
         if (this.mainConnected() && mainS !== s) btns += `<button type="button" class="btn-small" data-sync="main" data-s="${s}">Main here</button>`;
       }
-      const j = this.last[s];
+      const js = this.run.jumps[s], j = js[js.length - 1];
       return `<div class="hd-slot sync-slot" data-state="${live ? 'on' : 'off'}" data-who="${s}">` +
         `<div class="hd-slot-head"><span class="hd-slot-num">${s}</span><span class="hd-slot-where">${SYNC_NAME[s]} trampoline</span>` +
-        `${isMain ? '<span class="pill pill-demo">Main</span>' : ''}</div>` +
+        `${s === 'L' ? '<span class="pill sync-lead">Lead</span>' : ''}${isMain ? '<span class="pill pill-demo">Main</span>' : ''}</div>` +
         `<div class="sync-times">` +
         `<div><span class="sync-t">${this.sec(j && j.flightMs)}</span><span class="sync-tl">Air s</span></div>` +
         `<div><span class="sync-t sync-t-bed">${this.sec(j && j.contactMs)}</span><span class="sync-tl">Bed s</span></div></div>` +
@@ -504,43 +557,63 @@ const Sync = {
     }).join('');
   },
 
+  /** Recent gaps as bars out from the middle: right of centre = Right behind. */
+  gapBarsHTML(pairs) {
+    if (!pairs.length) return '';
+    const scale = Math.max(50, ...pairs.map((p) => Math.abs(p.landDiff)));
+    return `<div class="sync-axis"><span>◀ Right ahead</span><span>Right behind ▶</span></div><div class="sync-list">` +
+      pairs.map((p) => {
+        const w = Math.min(50, (Math.abs(p.landDiff) / scale) * 50);
+        const dir = p.landDiff > 0 ? 'behind' : 'ahead';
+        return `<div class="sync-row"><span class="sync-n">${p.n}</span><div class="sync-track">` +
+          `<span class="sync-bar" data-dir="${dir}" style="${dir === 'behind' ? 'left' : 'right'}:50%;width:${w.toFixed(1)}%"></span></div>` +
+          `<span class="sync-v">${this.ms(p.landDiff).replace(' ', '&nbsp;')}${p.slip ? ' ⚠' : ''}</span></div>`;
+      }).join('') + '</div>';
+  },
+
+  slipNote(pairs) {
+    const s = pairs.filter((p) => p.slip).pop();
+    return s ? `<span class="hd-soon">⚠ The gap jumped by about a bounce at jump ${s.n}: a landing may have been missed. If the numbers look wrong, stop and Resync.</span> ` : '';
+  },
+
   /** The last landing gap, big, and the recent ones as bars. */
   renderNow() {
     const el = document.getElementById('sync-now');
-    if (!el || typeof S === 'undefined' || S.view !== 'sync') return;
+    if (!el || !this.onTab()) return;
     const n = SYNC_SLOTS.filter((s) => this.boardAt(s)).length;
-    const last = this.pairs[this.pairs.length - 1];
-    const recent = this.pairs.slice(-12);
+    const pairs = this.run.pairs;
+    const last = pairs[pairs.length - 1];
+    const recent = pairs.slice(-12);
     let big = `<p class="sync-wait">${n === 2 ? 'Waiting for both jumpers to land…' : 'Connect a sensor on each trampoline above.'}</p>`;
     if (last) {
       const v = this.verdict(last.landDiff);
       const pm = last.err != null ? ` <span class="sync-pm">±${Math.ceil(last.err)} ms</span>` : '';
-      big = `<div class="sync-big"${v.who ? ` data-who="${v.who}"` : ''}>` +
+      big = `<div class="sync-big"${v.dir ? ` data-dir="${v.dir}"` : ''}>` +
         `<span class="sync-num">${this.ms(last.landDiff)}</span>` +
         `<span class="sync-who">${v.text}${pm}</span></div>`;
     }
-    // Recent landings as bars out from the middle: left of centre = Left first.
-    const scale = Math.max(50, ...recent.map((p) => Math.abs(p.landDiff)));
-    const bars = recent.map((p) => {
-      const w = Math.min(50, (Math.abs(p.landDiff) / scale) * 50);
-      const side = p.landDiff > 0 ? 'L' : 'R';
-      return `<div class="sync-row"><span class="sync-n">${p.n}</span><div class="sync-track">` +
-        `<span class="sync-bar" data-who="${side}" style="${side === 'L' ? 'right' : 'left'}:50%;width:${w.toFixed(1)}%"></span></div>` +
-        `<span class="sync-v">${Math.round(Math.abs(p.landDiff))}</span></div>`;
-    }).join('');
+    // Whoever is ahead on count is waiting for the other's landing.
+    const wait = this.queue.L.length - this.queue.R.length;
     const mean = this.meanGap(recent);
-    const rough = this.pairs.some((p) => p.rough);
-    const missed = this.unpaired.L + this.unpaired.R;
+    const rough = pairs.some((p) => p.rough);
     el.innerHTML =
-      `<div class="hd-head"><div><p class="kicker">Run ${this.runs.length + 1} · landing gap</p>` +
+      `<div class="hd-head"><div><p class="kicker">Run ${this.run.n} · landing gap · Left leads</p>` +
       `<h2 class="hd-title">How together</h2></div>` +
       `<span class="hd-count${n === 2 ? ' all' : ''}">${n}/2 sensors</span></div>` +
-      big +
-      (recent.length ? `<div class="sync-axis"><span>◀ Left first</span><span>Right first ▶</span></div><div class="sync-list">${bars}</div>` : '') +
-      `<p class="hd-note">${mean != null ? `Average over the last ${recent.length}: <b>${Math.round(mean)} ms</b> apart. ` : ''}` +
-      `${missed ? `Unmatched landings: left ${this.unpaired.L}, right ${this.unpaired.R}. ` : ''}` +
-      `${missed >= 3 ? '<span class="hd-soon">Still climbing? You\'re out of synch: press Resync.</span> ' : ''}` +
+      big + this.gapBarsHTML(recent) +
+      `<p class="hd-note">${mean != null ? `Average over the last ${recent.length}: <b>${this.ms(mean)}</b> apart. ` : ''}` +
+      `${Math.abs(wait) >= 2 ? `${wait > 0 ? 'Left' : 'Right'} is ${Math.abs(wait)} landings ahead on count. ` : ''}` +
+      this.slipNote(recent) +
       `${rough ? '<span class="hd-soon">Rough timing: update the firmware on both sensors for ±ms accuracy.</span>' : ''}</p>`;
+  },
+
+  /** Each side's bar chart, like Live's. */
+  renderCharts(force = false) {
+    if (!this.onTab()) return;
+    for (const s of SYNC_SLOTS) {
+      const c = this.charts[s];
+      if (c) c.setJumps(this.run.jumps[s], { animate: !force });
+    }
   },
 
   /** One row per jump: each side's air and bed time, then the landing gap. */
@@ -548,43 +621,140 @@ const Sync = {
     if (!pairs.length) return '<p class="dim">No paired landings yet.</p>';
     const side = (air, bed) => `<span class="sync-air">${this.sec(air)}</span> <span class="dim">${this.sec(bed)}</span>`;
     return `<table class="hd-table sync-table"><thead><tr><th>#</th><th>Left<br><span class="dim">air bed</span></th>` +
-      `<th>Right<br><span class="dim">air bed</span></th><th>Landing gap</th></tr></thead><tbody>` +
+      `<th>Right<br><span class="dim">air bed</span></th><th>Landing gap<br><span class="dim">Right vs Left</span></th></tr></thead><tbody>` +
       pairs.slice().reverse().map((p) => {
         const v = this.verdict(p.landDiff);
-        return `<tr><td>${p.n}</td><td data-who="L">${side(p.flightL, p.contactL)}</td><td data-who="R">${side(p.flightR, p.contactR)}</td>` +
-          `<td><b>${this.ms(p.landDiff)}</b>${v.who ? ` <span class="dim">${v.who}</span>` : ''}</td></tr>`;
+        return `<tr${p.slip ? ' class="sync-slip"' : ''}><td>${p.n}</td><td data-who="L">${side(p.flightL, p.contactL)}</td><td data-who="R">${side(p.flightR, p.contactR)}</td>` +
+          `<td><b>${this.ms(p.landDiff)}</b> <span class="dim">${v.short}</span>${p.slip ? ' <span title="Possible missed landing">⚠</span>' : ''}</td></tr>`;
       }).join('') + '</tbody></table>';
   },
 
   renderPairs() {
     const el = document.getElementById('sync-pairs');
-    if (!el || typeof S === 'undefined' || S.view !== 'sync') return;
-    el.innerHTML = this.pairsTable(this.pairs);
+    if (!el || !this.onTab()) return;
+    el.innerHTML = this.pairsTable(this.run.pairs);
+  },
+
+  renderSaveBtn() {
+    const btn = document.querySelector('#view-sync [data-sync="save"]');
+    if (!btn) return;
+    btn.textContent = this.saveLabel(this.run);
+    btn.disabled = !this.run.pairs.length || (this.run.savedId != null && !this.run.dirty);
   },
 
   renderRuns() {
     const el = document.getElementById('sync-runs');
-    if (!el) return;
+    if (!el || !this.onTab()) return;
     el.innerHTML = this.runs.length ? `<h2 class="dbg-h">Earlier runs</h2>` + this.runs.slice().reverse().map((r) => {
       const mean = this.meanGap(r.pairs);
+      const saved = r.savedId != null && !r.dirty;
       return `<details class="dbg-card sync-run"><summary><b>Run ${r.n}</b> · ${fmtTime(r.startedAt)} · ` +
-        `${r.pairs.length} jump${r.pairs.length === 1 ? '' : 's'} · avg ${Math.round(mean)} ms apart</summary>` +
-        this.pairsTable(r.pairs) + '</details>';
+        `${r.pairs.length} jump${r.pairs.length === 1 ? '' : 's'}${mean != null ? ` · avg ${this.ms(mean)} apart` : ''}${saved ? ' · saved' : ''}</summary>` +
+        this.pairsTable(r.pairs) +
+        (r.pairs.length ? `<div class="dbg-row"><button type="button" class="btn-small" data-sync="save-run" data-run="${r.n}"${saved ? ' disabled' : ''}>${this.saveLabel(r)}</button></div>` : '') +
+        '</details>';
     }).join('') : '';
   },
 
+  /* ---------- History → Synchro ---------- */
+  histOpen: null,             // id of the saved run opened in History
+
+  async historyCount() {
+    try { return (await DB.all('syncRuns')).length; } catch (e) { return 0; }
+  },
+
+  async renderHistory(root) {
+    for (const c of this.histCharts) c.ro.disconnect();
+    this.histCharts = [];
+    let recs = [];
+    try { recs = await DB.all('syncRuns'); } catch (e) { recs = []; }
+    recs.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+    if (!recs.length) {
+      root.innerHTML = '<div class="empty"><strong>No synchro runs yet</strong>On the Synchro tab, press “Save to History” to keep a run here.</div>';
+      return;
+    }
+    const days = [];
+    for (const r of recs) {
+      const k = dayKey(r.startedAt);
+      if (!days.length || days[days.length - 1].key !== k) days.push({ key: k, list: [] });
+      days[days.length - 1].list.push(r);
+    }
+    root.innerHTML = days.map((d) => `<h2 class="section-label">${esc(dayLabel(d.key))}</h2>
+      <ul class="list">${d.list.map((r) => this.historyCardHTML(r)).join('')}</ul>`).join('');
+    const open = recs.find((r) => r.id === this.histOpen);
+    if (open) {
+      for (const s of SYNC_SLOTS) {
+        const el = root.querySelector(`[data-sh-chart="${s}"]`);
+        if (!el) continue;
+        const c = new JumpChart(el, { emptyText: '<strong>No jumps</strong>' });
+        c.setJumps((open.jumps && open.jumps[s]) || [], { resetView: true });
+        this.histCharts.push(c);
+      }
+    }
+  },
+
+  historyCardHTML(r) {
+    const mean = this.meanGap(r.pairs);
+    const isOpen = r.id === this.histOpen;
+    const names = r.names ? `${esc(r.names.L)} <span class="dim">vs</span> ${esc(r.names.R)}` : 'Synchro run';
+    const card = `<button type="button" class="card-btn session-card" data-sh-open="${r.id}" aria-expanded="${isOpen}">
+      <span class="session-name">${names}</span>
+      <span class="chev"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${isOpen ? 'M5 9l7 7 7-7' : 'M9 5l7 7-7 7'}" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+      <span class="session-meta">${fmtTime(r.startedAt)} · ${r.pairs.length} jump${r.pairs.length === 1 ? '' : 's'}${mean != null ? ` · avg ${this.ms(mean)} apart` : ''}</span>
+    </button>`;
+    if (!isOpen) return `<li>${card}</li>`;
+    return `<li class="sync-hist">${card}
+      <div class="chart-card hd-card sync-card">${this.gapBarsHTML(r.pairs)}<p class="hd-note">${this.slipNote(r.pairs)}</p></div>
+      ${SYNC_SLOTS.map((s) => `<h3 class="hd-sub">${SYNC_NAME[s]} · ${esc(r.names ? r.names[s] : SYNC_NAME[s])}</h3><div class="chart-card sync-chart" data-sh-chart="${s}"></div>`).join('')}
+      <div class="dbg-card">${this.pairsTable(r.pairs)}
+        <div class="dbg-row">
+          <button type="button" class="btn-small" data-sh-csv="${r.id}">CSV</button>
+          <button type="button" class="btn-small btn-outline btn-danger" data-sh-del="${r.id}">Delete</button>
+        </div></div></li>`;
+  },
+
+  /** History's click handler offers every click here first; true = handled. */
+  async historyClick(e) {
+    const open = e.target.closest('[data-sh-open]');
+    if (open) {
+      const id = Number(open.dataset.shOpen);
+      this.histOpen = this.histOpen === id ? null : id;
+      renderHistory();
+      return true;
+    }
+    const csv = e.target.closest('[data-sh-csv]');
+    if (csv) {
+      const r = await DB.get('syncRuns', Number(csv.dataset.shCsv));
+      if (r) this.exportCsv([{ n: 1, pairs: r.pairs }], r.startedAt);
+      return true;
+    }
+    const del = e.target.closest('[data-sh-del]');
+    if (del) {
+      const id = Number(del.dataset.shDel);
+      if (await confirmDialog('Delete this synchro run?', 'It will be permanently deleted from this device.')) {
+        await DB.del('syncRuns', id);
+        for (const r of [...this.runs, this.run]) if (r.savedId === id) { r.savedId = null; r.dirty = true; }
+        this.histOpen = null;
+        renderHistory();
+        toast('Synchro run deleted');
+      }
+      return true;
+    }
+    return false;
+  },
+
   /* ---------- export ---------- */
-  async exportCsv() {
-    const runs = [...this.runs, { n: this.runs.length + 1, pairs: this.pairs }].filter((r) => r.pairs.length);
+  async exportCsv(runs, when = new Date().toISOString()) {
+    runs = runs.filter((r) => r.pairs.length);
     if (!runs.length) { toast('Nothing to export'); return; }
-    const head = 'run,jump,time,landing_diff_ms,takeoff_diff_ms,first,flight_left_ms,flight_right_ms,contact_left_ms,contact_right_ms,error_ms,rough';
+    const head = 'run,jump,time,landing_gap_ms,takeoff_gap_ms,right_is,flight_left_ms,flight_right_ms,contact_left_ms,contact_right_ms,error_ms,rough,possible_missed_landing';
     const f = (x, dp = 1) => (Number.isFinite(x) ? x.toFixed(dp) : '');
     const rows = runs.flatMap((r) => r.pairs.map((p) => {
       const v = this.verdict(p.landDiff);
-      return [r.n, p.n, p.at, f(p.landDiff), f(p.takeDiff), v.who ? SYNC_NAME[v.who].toLowerCase() : 'together',
-        f(p.flightL), f(p.flightR), f(p.contactL), f(p.contactR), f(p.err), p.rough ? 1 : 0].join(',');
+      return [r.n, p.n, p.at, f(p.landDiff), f(p.takeDiff), v.dir || 'together',
+        f(p.flightL), f(p.flightR), f(p.contactL), f(p.contactR), f(p.err), p.rough ? 1 : 0, p.slip ? 1 : 0].join(',');
     }));
-    const file = new File([[head, ...rows].join('\r\n') + '\r\n'], `${slug(CONFIG.brandName)}-synchro-${slug(new Date().toISOString())}.csv`, { type: 'text/csv' });
+    const file = new File([[head, ...rows].join('\r\n') + '\r\n'], `${slug(CONFIG.brandName)}-synchro-${slug(when)}.csv`, { type: 'text/csv' });
     if (isMobile() && navigator.canShare && navigator.canShare({ files: [file] })) {
       try { await navigator.share({ files: [file], title: 'Synchro' }); return; }
       catch (e) { if (e.name === 'AbortError') return; }
@@ -610,8 +780,10 @@ const Sync = {
         case 'main':       this.useMain(s); break;
         case 'unmain':     this.cfg(s).name = null; this.save(); this.render(); break;
         case 'resync':     this.resync(); break;
+        case 'save':       this.saveRun(this.run); break;
+        case 'save-run':   this.saveRun(this.runs.find((r) => r.n === Number(btn.dataset.run))); break;
         case 'clear':      this.clearAll(); break;
-        case 'csv':        this.exportCsv(); break;
+        case 'csv':        this.exportCsv([...this.runs, this.run]); break;
       }
     });
   },
