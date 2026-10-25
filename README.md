@@ -8,6 +8,7 @@ styles.css            all styling: night-sky theme, colour tokens and star layer
 app.js                CONFIG + parsePacket() at the top, then everything else
 debug.js              the Debug screen (hidden until switched on)
 hd.js                 HD: four-corner landing data collection, behind the HD switch on the Debug screen
+sync.js               Synchro: two trampolines, one sensor each, the gap between the landings (its own tab)
 icon.svg              the 2themoon logo mark (trampoline → dotted jump arc → full grey moon), used as favicon / home-screen icon
 manifest.webmanifest  lets Android "Add to Home screen"
 fonts/                Barlow Condensed (self-hosted, SIL Open Font License, see fonts/OFL.txt)
@@ -39,7 +40,7 @@ Cloudflare Pages and Netlify work too: point them at the repo, with no build com
 
 **After an upload, refresh properly.** GitHub Pages serves every file with a ten-minute cache, so a browser can pick up the new `app.js` next to the old `index.html`. The two no longer fit: `boot()` throws on an element that isn't there any more, the sensor still connects (that listener is wired first) but nothing is saved or drawn. Hard-refresh after uploading — `Cmd/Ctrl+Shift+R`, or Site settings -> Clear & reset on Android, and clear the home-screen app's storage too. The page guards against this itself: `app.js` sets `window.__booted` once it is up, and the small script at the bottom of `index.html` refetches the files past the cache and reloads if that flag is missing after five seconds. It only ever does this once per tab, so a genuine fault can't turn into a reload loop.
 
-**Bump the version on every upload.** `index.html` loads `styles.css`, `app.js`, `debug.js` and `hd.js` with a `?v=` date (e.g. `debug.js?v=20261005`). Change all four to today's date whenever you upload a change to any of them. A new `index.html` then asks for URLs the browser has never cached, so it can't be paired with an old script. Forgetting this is how a new button can show up and do nothing: the new page runs with the old `debug.js`.
+**Bump the version on every upload.** `index.html` loads `styles.css`, `app.js`, `debug.js`, `hd.js` and `sync.js` with a `?v=` date (e.g. `debug.js?v=20261005`). Change all five to today's date whenever you upload a change to any of them. A new `index.html` then asks for URLs the browser has never cached, so it can't be paired with an old script. Forgetting this is how a new button can show up and do nothing: the new page runs with the old `debug.js`.
 
 ## Run it locally for testing
 
@@ -74,7 +75,7 @@ Open `app.js`. The first block is `CONFIG`:
 | `reconnectAttempts` | Automatic reconnect tries | `5` |
 | `backfillWindowMs` | After (re)connecting, ask the sensor to resend missed jumps if our last jump is this recent | 10 minutes |
 | `flagLabels` | Plain-English text shown next to raw flag values | from `detector.h` |
-| `dbName` / `dbVersion` | IndexedDB name and schema version | `trampoline-sensor-v1` / `2` |
+| `dbName` / `dbVersion` | IndexedDB name and schema version | `trampoline-sensor-v1` / `6` |
 
 UUIDs must be **lower-case** for Web Bluetooth.
 
@@ -85,6 +86,14 @@ UUIDs must be **lower-case** for Web Bluetooth.
 **Packet format:** everything about the wire format is in **`parsePacket(line)`**, right under `CONFIG`. It gets one text line and returns `{kind:'jump', …}`, `{kind:'idle'}`, `{kind:'ignore'}` or `null` (bad line: logged to the console and dropped). Bluetooth notifications are treated as a byte stream and split into lines on `\n` before `parsePacket` sees them, which matches `link.h` (lines can be split across notifications). If you switch to a binary format, change `BLE.onValue` to pass whole packets straight through and rewrite `parsePacket`.
 
 **Schema changes:** bump `dbVersion` and add an `else if (e.oldVersion < N) { … }` branch in `DB.open()`, which carries the data already on the device across rather than dropping it. The v1 → v2 step is `migrateV1ToV2()`: v1 kept one flat "turn" per burst, so each old turn becomes a turn holding a single set with the same jumps, and sessions, names and settings are kept. It all runs inside the versionchange transaction, so it is written as callbacks — an `await` there would let the transaction commit halfway through.
+
+## Synchro
+
+Two trampolines side by side, one sensor each (the **Synchro** tab). Each sensor's clock is tied to the phone's with `z` pings, so landings compare to the millisecond.
+
+- **Pairing is by count, Left leads:** after Resync, Left's Nth landing pairs with Right's Nth, so the gap has no cap (shown as "Right 1.30 s behind/ahead").
+- **Resync** starts a new run from jump 1. Use it when the jumpers drift apart, or when ⚠ flags a likely missed landing (the gap jumped by about a bounce).
+- Runs stay on screen until the page is left; **Save to History** keeps one (store `syncRuns`), listed under **History → Synchro**.
 
 ## Demo mode
 
