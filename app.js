@@ -65,6 +65,21 @@ const CONFIG = {
     8: 'Much longer than the jumps before it (probably a missed landing)',
   },
 
+  // --- Suspect jumps (display only) ------------------------------------------
+  // The sensor sometimes misses a landing, so one reported jump is really two
+  // flights plus the bed contact between them (e.g. 2088 ms among ~1000 ms
+  // flights). These jumps get a red flag and a warning. Nothing else changes:
+  // they still count in every stat and 10 bounce time, and nothing is stored.
+  // Judged against the JUMPER: the baseline is the same turn's earlier jumps,
+  // across its sets (a jump with no known turn falls back to its set).
+  suspect: {
+    longFlightFlag: 8,     // 1. the firmware already says so (LONG_FLIGHT)
+    baselineJumps: 5,      // 2. compare with the median air time of up to this many earlier,
+    baselineMin: 2,        //    non-suspect jumps of the same jumper (needs at least this many)
+    ratio: 1.6,            //    suspect if air > ratio x that median
+    maxJumpMs: 3000,       // 3. the biggest real bounce: air + bed over this is suspect regardless
+  },
+
   // --- 10 bounce time --------------------------------------------------------
   // How a routine's time of flight is judged at competition: the air time of
   // ten consecutive bounces added up. Counting starts with the first take-off
@@ -212,6 +227,58 @@ function flagText(flags) {
   for (const [bit, label] of Object.entries(CONFIG.flagLabels)) if (flags & Number(bit)) parts.push(label);
   return parts.join('; ');
 }
+
+/* ---------- Suspect jumps (missed landing) ----------
+   Pure: `baseline` is the same jumper's (turn's) earlier non-suspect jumps,
+   oldest first. Returns null, or a short human reason. */
+function suspectReason(jump, baseline = []) {
+  const C = CONFIG.suspect;
+  if (jump.flags & C.longFlightFlag) return 'sensor flagged a missed landing';
+  const recent = baseline.slice(-C.baselineJumps).map((j) => j.flightMs).sort((a, b) => a - b);
+  if (recent.length >= C.baselineMin) {
+    const m = recent.length >> 1;
+    const median = recent.length % 2 ? recent[m] : (recent[m - 1] + recent[m]) / 2;
+    if (median > 0 && jump.flightMs > C.ratio * median) {
+      return `air time ${(jump.flightMs / median).toFixed(1)}× the last few bounces`;
+    }
+  }
+  if (jump.flightMs + jump.contactMs > C.maxJumpMs) return `longer than any real bounce (over ${C.maxJumpMs / 1000} s air + bed)`;
+  return null;
+}
+/* Which turn (jumper) a set belongs to: the current session's sets, plus any
+   older ones getTurnData() has read. */
+const SET_TURN = new Map();
+function turnOfSet(setId) {
+  const st = S.sets && S.sets.find((x) => x.id === setId);
+  return st ? st.turnId : SET_TURN.get(setId);
+}
+/** Map of jump id -> reason for the suspect jumps in a list (in order), with
+    one baseline per turn, so a suspect jump never becomes part of a later
+    baseline. A jump whose turn isn't known falls back to its set. */
+function suspectMap(jumps) {
+  const out = new Map(), baselines = new Map();
+  for (const j of jumps) {
+    const turnId = turnOfSet(j.setId);
+    const key = turnId != null ? `t${turnId}` : `s${j.setId}`;
+    let base = baselines.get(key);
+    if (!base) baselines.set(key, base = []);
+    const why = suspectReason(j, base);
+    if (why) out.set(j.id, why); else base.push(j);
+  }
+  return out;
+}
+const suspectWarning = (why) => `Suspect jump — ${why}. This may be two bounces merged by a missed landing.`;
+/** "Includes 1 suspect jump (bounce 6)" for a 10 bounce run, or ''. `context` is
+    the whole turn (or at least everything before the run), for the baselines. */
+function tbSuspectHTML(run, context) {
+  if (!run.length) return '';
+  const sus = suspectMap(context && context.length ? context : run);
+  const which = [];
+  run.forEach((j, k) => { if (sus.has(j.id)) which.push(k + 1); });
+  if (!which.length) return '';
+  return `<p class="tb-suspect">${SUSPECT_FLAG_SVG}Includes ${which.length} suspect jump${which.length === 1 ? '' : 's'} (bounce${which.length === 1 ? '' : 's'} ${which.join(', ')}) — the time is unchanged.</p>`;
+}
+const SUSPECT_FLAG_SVG = '<svg class="suspect-ico" viewBox="0 0 12 14" aria-hidden="true"><path d="M2 1v12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M2.9 1.5h7.6l-2 3 2 3H2.9z" fill="currentColor"/></svg>';
 
 const LOGO_SVG = '<svg class="wm-logo" viewBox="0 0 40 36" aria-hidden="true"><defs> <radialGradient id="tmMoon" cx="40%" cy="36%" r="70%"><stop offset="0" stop-color="#F4F4F1"/><stop offset=".55" stop-color="#CDCDC8"/><stop offset="1" stop-color="#8F8F8B"/></radialGradient> </defs> <path d="M1.5 33.5 h11" stroke="#5CB8FF" stroke-width="2.4" stroke-linecap="round"/> <path d="M3 33.5 l-1 2.2 M11 33.5 l1 2.2" stroke="#5CB8FF" stroke-width="1.6" stroke-linecap="round"/> <path d="M7 31 Q9 15 19.5 13.5" fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-dasharray="0.1 3.2"/> <circle cx="29" cy="11" r="9.2" fill="url(#tmMoon)"/> <g fill="#6F6F6C" opacity=".45"> <path d="M24.5 6.5 c2-1.6 5-1.2 5.6.6 .5 1.6-1.4 2.4-2.8 3.2 -1.2.7-2.9 1.2-3.6.1 -.6-1.1-.2-2.9.8-3.9z"/> <path d="M30.5 11.5 c1.8-.8 4-.2 4.3 1.3 .3 1.7-1.5 2.3-2.9 3 -1.3.6-2.6.2-2.8-.9 -.2-1.3.3-2.8 1.4-3.4z"/> <ellipse cx="26" cy="14" rx="1.6" ry="1.1"/> </g> <g fill="none" stroke="#9A9A96" stroke-width=".45" opacity=".9"> <circle cx="33" cy="6.5" r="1"/><circle cx="25.5" cy="17" r=".8"/><circle cx="31" cy="17.5" r="1.2"/> </g> <circle cx="30.2" cy="18" r=".4" fill="#fff" opacity=".6"/> <path d="M8 4 l.9 2.2 2.2 .9 -2.2 .9 -.9 2.2 -.9 -2.2 -2.2 -.9 2.2 -.9z" fill="#fff"/> <circle cx="37.5" cy="30" r=".8" fill="#fff"/></svg>';
 function wordmarkHTML() {
@@ -1114,13 +1181,21 @@ class DemoSensor {
       const peak = Math.min(7, Math.max(3, 3 + (flight - 0.9) * 5 + this.rand(-0.4, 0.4)));
       if (peak > 6.8 && Math.random() < 0.5) flags |= 2;
       if (Math.random() < 0.04) flags |= 4;
+      // Now and then the sensor misses a landing: two flights and the bed time
+      // between them come out as one long jump. Half the time the firmware says
+      // so (LONG_FLIGHT); otherwise only the app's suspect check catches it.
+      let flightOut = flight;
+      if (i >= 3 && Math.random() < 1 / 12) {
+        flightOut = 2 * flight + this.rand(0.2, 0.3);
+        if (Math.random() < 0.5) flags |= 8;
+      }
       await this.wait(contact * 1000);
       this.state('CONTACT', 'FLIGHT');
-      await this.wait(flight * 1000);
+      await this.wait(flightOut * 1000);
       this.state('FLIGHT', 'CONTACT');
-      this.clock += Math.round((contact + flight) * 1000);
+      this.clock += Math.round((contact + flightOut) * 1000);
       if (!this.running) return;
-      this.emit(`J,${this.index++},${(flight * 1000).toFixed(1)},${(contact * 1000).toFixed(1)},${peak.toFixed(2)},${this.clock},${flags}`);
+      this.emit(`J,${this.index++},${(flightOut * 1000).toFixed(1)},${(contact * 1000).toFixed(1)},${peak.toFixed(2)},${this.clock},${flags}`);
       if (Math.random() < 0.03) this.emit('J,oops,not-a-number');   // bad data must be ignored, never crash
       if (Math.random() < 0.05) this.emit(`X,${this.sample},short_contact`);
     }
@@ -1194,6 +1269,7 @@ class JumpChart {
     this.emptyText = emptyText;
     this.onTenBounce = onTenBounce;   // given: the jump detail offers "See 10 bounce time" from that jump
     this.highlight = new Set();       // ids of the jumps in a 10 bounce run, drawn as a band
+    this.context = null;              // the whole turn, when showing less of it: baseline for suspect jumps
     this.uid = ++chartUid;
     this.jumps = []; this.pinned = true; this.selected = null; this.newFrom = Infinity;
     JumpChart.all.add(this);
@@ -1308,7 +1384,9 @@ class JumpChart {
       return;
     }
     const ft = flagText(j.flags);
+    const why = (this.suspects || suspectMap(this.context || this.jumps)).get(j.id);
     this.detail.innerHTML = `
+      ${why ? `<span class="d-suspect">${SUSPECT_FLAG_SVG}${esc(suspectWarning(why))}</span>` : ''}
       <span class="d-title">Jump ${this.selected + 1}</span>
       <span class="d-total">Total <b>${secs(j.flightMs + j.contactMs)} s</b></span>
       <span class="d-air">Air <b>${secs(j.flightMs)} s</b></span>
@@ -1338,6 +1416,7 @@ class JumpChart {
   render() {
     this.renderStyle();
     const n = this.jumps.length;
+    const sus = this.suspects = suspectMap(this.context || this.jumps);
     const scrollerW = this.scroller.clientWidth;
     if (!scrollerW) return;   // hidden
 
@@ -1434,13 +1513,14 @@ class JumpChart {
       const bedH = base - yBed, airH = yBed - yTop;
       const isNew = i >= this.newFrom;
       const ft = flagText(j.flags);
+      const why = sus.get(j.id);
       const w = barW.toFixed(1);
       // air segment: rounded top corners only
       const airPath = `M${x0.toFixed(1)} ${yBed.toFixed(1)} V${(yTop + rx).toFixed(1)} q0 ${-rx} ${rx} ${-rx} h${(barW - 2 * rx).toFixed(1)} q${rx} 0 ${rx} ${rx} V${yBed.toFixed(1)} z`;
       const yAir = y(j.flightMs / 1000);
       const r = Math.max(2.5, Math.min(5.5, groupW / 7));
-      out += `<g class="jump${isNew ? ' new' : ''}${this.selected === i ? ' sel' : ''}${this.highlight.has(j.id) ? ' tb' : ''}" data-i="${i}"${this.fit ? '' : ' tabindex="0" role="button"'}
-          aria-label="Jump ${i + 1}: total ${secs(totalMs)} seconds, air ${secs(j.flightMs)}, bed ${secs(j.contactMs)}${j.flags ? ', flagged' : ''}">
+      out += `<g class="jump${isNew ? ' new' : ''}${this.selected === i ? ' sel' : ''}${this.highlight.has(j.id) ? ' tb' : ''}${why ? ' suspect' : ''}" data-i="${i}"${this.fit ? '' : ' tabindex="0" role="button"'}
+          aria-label="Jump ${i + 1}: total ${secs(totalMs)} seconds, air ${secs(j.flightMs)}, bed ${secs(j.contactMs)}${why ? `, suspect: ${esc(why)}, possibly a missed landing` : j.flags ? ', flagged' : ''}">
         <rect class="hit" x="${gx}" y="${top - 24}" width="${groupW}" height="${plotH + 24 + bottom}" rx="8"/>
         ${line ? `<g class="dots">
           <circle class="dot-total" cx="${cx}" cy="${yTop.toFixed(1)}" r="${r.toFixed(1)}"/>
@@ -1458,7 +1538,8 @@ class JumpChart {
         ${barW >= insideAt && airH >= 22 ? `<text class="val val-in-air" x="${cx}" y="${(yBed - 7).toFixed(1)}">${secs(j.flightMs)}</text>` : ''}
         ${barW >= insideAt && bedH >= 20 ? `<text class="val val-in-bed" x="${cx}" y="${(base - 6).toFixed(1)}">${secs(j.contactMs)}</text>` : ''}` : ''}`}
         ${i % labelEvery === 0 || i === n - 1 ? `<text class="xlab" x="${(gx + groupW / 2).toFixed(1)}" y="${(base + 20).toFixed(1)}">${i + 1}</text>` : ''}
-        ${j.flags ? `<path class="flag-mark" d="M${(gx + groupW / 2).toFixed(1)} ${(top - 16).toFixed(1)} l4 7 h-8 z"><title>Flags ${j.flags}${ft ? ': ' + esc(ft) : ''}</title></path>` : ''}
+        ${why ? `<g class="suspect-mark" transform="translate(${(gx + groupW / 2 - 3).toFixed(1)} ${(top - 20).toFixed(1)})"><title>Suspect jump: ${esc(why)}${ft ? ` · Flags ${j.flags}: ${esc(ft)}` : ''}</title><path d="M0.9 0v13" stroke-width="1.8" stroke-linecap="round"/><path d="M1.6 0.5h8l-2.2 3.2 2.2 3.2h-8z"/></g>`
+        : j.flags ? `<path class="flag-mark" d="M${(gx + groupW / 2).toFixed(1)} ${(top - 16).toFixed(1)} l4 7 h-8 z"><title>Flags ${j.flags}${ft ? ': ' + esc(ft) : ''}</title></path>` : ''}
       </g>`;
     }
     // Set brackets under the x labels, and a divider between one set and the next.
@@ -1607,7 +1688,7 @@ function renderLive({ newJump = false } = {}) {
   // A live count takes the highlight; otherwise the run picked from the chart.
   liveChart.highlight = new Set((TB.jumps.length ? TB.jumps : run).map((j) => j.id));
   liveChart.setJumps(jumps, { animate: newJump && !turnChanged, resetView: turnChanged });
-  renderTbPanel($('#live-tb'), run, startIdx);
+  renderTbPanel($('#live-tb'), run, startIdx, jumps);
 }
 
 function sparkHTML(jumps) {
@@ -1819,6 +1900,7 @@ async function getTurnData(turnId) {
   if (!turn) return null;
   const sets = (await DB.byIndex('sets', 'turnId', turnId)).sort(byNumber);
   const jumps = new Map();
+  for (const s of sets) SET_TURN.set(s.id, s.turnId);
   for (const s of sets) jumps.set(s.id, (await DB.byIndex('jumps', 'setId', s.id)).sort((a, b) => (a.order ?? a.id) - (b.order ?? b.id)));
   return { turn, sets, jumps, session: await DB.get('sessions', turn.sessionId) };
 }
@@ -1834,7 +1916,8 @@ async function getOverlayData(kind, id) {
   const data = kind === 'turn' ? await getTurnData(id) : await getSetData(id);
   if (!data) return null;
   data.isTurn = kind === 'turn';
-  data.list = data.isTurn ? data.sets.flatMap((s) => jumpsOfSet(s.id, data.jumps)) : data.list;
+  data.turnList = data.sets.flatMap((s) => jumpsOfSet(s.id, data.jumps));   // the whole go: baseline for suspect jumps
+  data.list = data.isTurn ? data.turnList : data.list;
   return data;
 }
 
@@ -1864,9 +1947,10 @@ async function renderOverlay(first = false) {
     else run = tbRun(list, startIdx);
   }
   overlayChart.highlight = new Set(run.map((j) => j.id));
+  overlayChart.context = data.turnList;
   overlayChart.setJumps(list, { resetView: first, animate: !first });
   if (first && startIdx >= 0) { overlayChart.select(startIdx); overlayChart.reveal(startIdx); }
-  await renderTbPanel($('#turn-overlay-tb'), run, startIdx);
+  await renderTbPanel($('#turn-overlay-tb'), run, startIdx, data.turnList);
   if (S.overlay !== showing) return;
 
   const setIndex = isTurn ? -1 : sets.findIndex((s) => s.id === set.id);
@@ -1903,6 +1987,7 @@ async function openResults(kind, id) {
     cell('', 'Peak G', `${s.peak.toFixed(1)}<small>g</small>`);
   $('#results').hidden = false;
   document.body.style.overflow = 'hidden';
+  resultsChart.context = data.turnList;
   resultsChart.setJumps(list, { resetView: true });
   requestAnimationFrame(() => resultsChart.render());
   $('#results-close').focus();
@@ -2024,6 +2109,8 @@ function renderTenBounce() {
   const N = CONFIG.tenBounceCount;
   const turn = tbTurn();
   const t = tbSums(TB.jumps);
+  const tbTurnId = TB.setId != null ? turnOfSet(TB.setId) : null;
+  const suspectLine = TB.setId != null ? tbSuspectHTML(TB.jumps, tbTurnId != null ? jumpsOfTurn(tbTurnId) : jumpsOfSet(TB.setId)) : '';
   let body;
   if (TB.phase === 'ready') {
     body = `<p class="tb-text">Counting starts with the next take-off after you press Start.</p>
@@ -2035,11 +2122,13 @@ function renderTenBounce() {
     body = `<div class="tb-count" aria-live="polite" aria-label="${t.n} of ${N} bounces"><b>${t.n}</b><span>/ ${N}</span></div>
       <div class="tb-pips" aria-hidden="true">${pips}</div>
       <p class="tb-text">${t.n ? `Air so far <b class="tb-sofar">${secs(t.air)} s</b>` : 'Waiting for the first take-off…'}</p>
+      ${suspectLine}
       <button type="button" class="btn-small btn-outline tb-cancel" data-tbl="cancel">Cancel</button>`;
   } else {
     const complete = t.n >= N;
     body = `${complete ? '' : tbPartialHTML(t.n)}
       ${tbNumbersHTML(t)}
+      ${suspectLine}
       <p class="tb-note">${complete ? (TB.saved ? 'Saved to History › 10 bounce.' : 'Could not be saved on this device.')
         : `Not saved: a 10 bounce time needs ${N} bounces in one go.`}</p>
       <div class="tb-actions">
@@ -2052,7 +2141,7 @@ function renderTenBounce() {
 }
 
 /* ---------- Looking back: the panel under a chart (Live, or a turn or set) ---------- */
-async function renderTbPanel(box, run, startIdx) {
+async function renderTbPanel(box, run, startIdx, context) {
   const seq = box.tbSeq = (box.tbSeq || 0) + 1;   // a newer render wins over one still waiting on the DB
   if (!run.length) { box.hidden = true; box.innerHTML = ''; return; }
   const t = tbSums(run);
@@ -2066,6 +2155,7 @@ async function renderTbPanel(box, run, startIdx) {
     </div>
     ${complete ? '' : tbPartialHTML(t.n, ' left in this set')}
     ${tbNumbersHTML(t)}
+    ${tbSuspectHTML(run, context)}
     <div class="tb-actions">${!complete ? '<span class="tb-note">Only a full 10 can be saved.</span>'
       : saved ? '<span class="tb-saved">✓ Saved to History › 10 bounce</span>'
       : '<button type="button" class="btn-primary" data-tbv="save">Save</button>'}</div>`;

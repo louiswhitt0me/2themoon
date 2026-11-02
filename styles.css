@@ -40,6 +40,8 @@
   --good: #3DDC97;
   --warn: #FFC83D;
   --danger: #FF4D6A;
+  --suspect: #FF4D4D;        /* red flag on a suspect jump (probably a missed landing) */
+  --suspect-bg: rgba(255, 77, 77, .14);
 
   --display: "Barlow Condensed", "Arial Narrow", "Roboto Condensed", system-ui, sans-serif;
   --body: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -378,6 +380,11 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
 .jump.sel .dots circle { stroke: var(--moon); stroke-width: 2.5; }
 .jump.new .dots { animation: pop .3s ease-out both; }
 .flag-mark { fill: var(--moon); }
+/* Suspect jump (probably a missed landing): a red flag instead of the ▲, and a red ring on the line point. */
+.suspect-mark { fill: var(--suspect); stroke: var(--suspect); }
+.suspect-mark path:last-child { stroke: none; }
+.jump.suspect .dots circle { stroke: var(--suspect); stroke-width: 2.5; }
+.suspect-ico { width: 12px; height: 14px; flex: none; vertical-align: -2px; margin-right: 6px; color: var(--suspect); }
 .jump { cursor: pointer; outline: none; }
 .jump .hit { fill: transparent; }
 .jump:hover .hit { fill: rgba(255,255,255,.04); }
@@ -400,6 +407,8 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
 .chart-detail .d-total b { font-size: 24px; color: var(--moon); }
 .chart-detail .d-bed b { color: var(--bed-ink); }
 .chart-detail .d-title { font: 800 18px/1 var(--display); text-transform: uppercase; color: var(--text); letter-spacing: .04em; }
+.chart-detail .d-suspect { flex: 1 0 100%; display: flex; align-items: flex-start; color: var(--suspect); font-size: 14px; font-weight: 700; line-height: 1.3; }
+.chart-detail .d-suspect .suspect-ico { margin-top: 2px; }
 .chart-detail .d-flag { background: var(--moon); color: var(--on-light); padding: 3px 8px; border-radius: 6px; font-size: 13px; font-weight: 600; }
 
 /* ---------- Session / history lists ---------- */
@@ -670,6 +679,8 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
   margin: 0; padding: 5px 12px; border-radius: 999px; background: rgba(255,200,61,.14); border: 1px solid var(--warn);
   color: var(--warn); font: 800 16px/1.1 var(--display); letter-spacing: .05em; text-transform: uppercase;
 }
+.tb-suspect { margin: 0; padding: 5px 12px; border-radius: var(--radius-sm); background: var(--suspect-bg); border: 1px solid var(--suspect);
+  color: var(--suspect); font-size: 14px; font-weight: 700; line-height: 1.3; text-align: center; }
 .tb-note { margin: 0; color: var(--text-2); font-size: 14px; font-weight: 600; }
 .tb-saved { color: var(--good); font-weight: 700; }
 .tb-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; width: 100%; }

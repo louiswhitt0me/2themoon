@@ -1,6 +1,6 @@
 # 2themoon — web app for the moonlander1 trampoline sensor
 
-A static, single-page website that connects to the **moonlander1** trampoline sensor over Bluetooth (Web Bluetooth), shows every jump live as one stacked bar (**Bed** at the bottom, **Air** on top, so the bar height is the total jump time `flightMs + contactMs`), and keeps every turn and training session on the device (IndexedDB). There's no server and no build step: it's just files.
+A static, single-page website that connects to the **moonlander1** trampoline sensor over Bluetooth (Web Bluetooth), shows every jump live as one stacked bar (**Bed** at the bottom, **Air** on top, so the bar height is the total jump time `flightMs + contactMs`; a **Bars / Line** toggle on each chart swaps to an air line with the total line above it), and keeps every turn and training session on the device (IndexedDB). There's no server and no build step: it's just files.
 
 ```
 index.html            page structure
@@ -75,6 +75,7 @@ Open `app.js`. The first block is `CONFIG`:
 | `reconnectAttempts` | Automatic reconnect tries | `5` |
 | `backfillWindowMs` | After (re)connecting, ask the sensor to resend missed jumps if our last jump is this recent | 10 minutes |
 | `flagLabels` | Plain-English text shown next to raw flag values | from `detector.h` |
+| `suspect` | When a jump gets a red "suspect" flag (probably a missed landing). Display only: stats, 10 bounce times and stored data are unchanged | flag 8, last 5 of the turn, 1.6×, 3000 ms |
 | `dbName` / `dbVersion` | IndexedDB name and schema version | `trampoline-sensor-v1` / `6` |
 
 UUIDs must be **lower-case** for Web Bluetooth.
@@ -114,6 +115,8 @@ Tap **Try demo** on the Live screen. It simulates the firmware's actual output (
 - **Disconnects:** a banner appears, all data is kept, and the app retries 5 times with back-off. After that a **Reconnect** button shows. On reconnect the app sends the firmware's `b N` command, so jumps made while disconnected are resent (duplicates are ignored).
 - **Screen stays on** while connected or in demo (Screen Wake Lock), and the lock comes back when you return to the tab.
 - **Flags:** a non-zero `flags` value puts a small ▲ above that jump's bar. Tap the jump to see the raw value and its meaning.
+- **Suspect jumps** (probably a missed landing, so two bounces merged into one) get a small **red flag** instead of the ▲, a red warning in the jump detail, and a note on any 10 bounce run that includes one ("Includes 1 suspect jump (bounce 6) — the time is unchanged"). A jump is suspect if, first match wins: the sensor set flag 8 (`LONG_FLIGHT`); or its air time is over **1.6×** the median of the same jumper's last 5 non-suspect jumps in the turn, across sets (needs 2; falls back to the set when there is no turn); or air + bed is over **3 s**, the most a real bounce is assumed to take. Worked out when the chart draws, never stored; a suspect jump never joins a later jump's baseline. Display only: stats, 10 bounce times and saved data are unchanged. Tunable in `CONFIG.suspect`. The demo makes about 1 in 12 jumps (from a set's 4th) a merged one so the flag can be seen.
+- **Tap a jump** for its details and a green **See 10 bounce time** button that adds up the next 10 from there.
 - **History** shows today's sessions first; anything older is folded into **Previous sessions** (grouped by day, with a **Clear** button and the storage the app is using).
 - **CSV:** from a set, a turn, a session, or History (everything). Rows carry `turn_number`, `jumper_name` and `set_number`. On Android it opens the share sheet; elsewhere it downloads.
 - Tap the green **moonlander1 connected** pill to disconnect.
