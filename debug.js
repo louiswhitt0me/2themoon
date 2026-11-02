@@ -29,6 +29,7 @@ const DBG = {
   maxLog: 600,          // lines of scrollback
   maxEvents: 400,
   trimChunk: 4000,
+  stallMs: 3000,        // streaming but no D block this long: send "d" again
   storageKey: '2themoon-debug',
 };
 
@@ -127,6 +128,8 @@ const Debug = {
   periodUs: null,
   dumpMode: null,
   armed: false,    // trigger mode is on: the sensor sends a window when a jump happens
+  want: null,      // the capture command last asked for ('d' | 'd t'), re-sent after a reconnect
+  lastBlockAt: 0,  // Date.now() of the newest D block, for the stall check
   // A saved capture on the scope instead of the live signal: {id, startedAt,
   // params, live: {g0, periodUs}}. Live samples are dropped until Back to live.
   viewing: null,
@@ -173,6 +176,7 @@ const Debug = {
     if (smoothBtn) smoothBtn.setAttribute('aria-pressed', String(this.show.smooth));
     this.canvas = document.getElementById('scope');
     this.wire();
+    setInterval(() => this.watchStream(), 1000);
     this.setEnabled(on, { quiet: true });
   },
 
@@ -270,9 +274,32 @@ const Debug = {
     this.renderStatus();
   },
 
+  /* ---------- keeping the capture mode alive ---------- */
+  // The sensor forgets "d" / "d t" when it reboots (a knock on the battery, a
+  // brownout), and the app's automatic reconnect never knew to send it again,
+  // so the scope sat empty until Stream was pressed by hand. Remember what was
+  // asked for, put it back on every connect, and while streaming, kick the
+  // sensor if nothing has arrived for a while.
+  onConnected() {
+    if (!this.want) return;
+    this.lastBlockAt = Date.now();
+    this.push(`# reconnected; asking for ${this.want} again`, 'out');
+    this.send(this.want);
+  },
+
+  watchStream() {
+    if (this.want !== 'd' || this.viewing || typeof BLE === 'undefined' || BLE.state !== 'connected') return;
+    const now = Date.now();
+    if (now - this.lastBlockAt < DBG.stallMs) return;
+    this.lastBlockAt = now;   // one kick per stall period, not one per tick
+    this.push(`# no samples for ${DBG.stallMs / 1000} s; restarting the stream`, 'out');
+    this.send('d');
+  },
+
   addBlock(p) {
     const rows = decodeBlock(p.b64);
     if (!rows.length) return;
+    this.lastBlockAt = Date.now();
     this.blocksIn++;
     const d = this.d;
     for (let i = 0; i < rows.length; i++) {
@@ -313,7 +340,7 @@ const Debug = {
     if (!line) return;
     if (typeof BLE === 'undefined' || !BLE.rx) { toast('Connect the sensor first'); return false; }
     try {
-      await BLE.rx.writeValue(new TextEncoder().encode(line + '\n'));
+      await BLE.send(line);
       this.push(line, 'out');
       return true;
     } catch (e) {
@@ -898,10 +925,10 @@ const Debug = {
       switch (btn.dataset.dbg) {
         // Only trigger mode stays on after its window is sent; the firmware
         // drops it for any other d command.
-        case 'stream':   if (await this.send('d')) this.setArmed(false); break;
-        case 'trigger':  if (await this.send('d t')) this.setArmed(true); break;
-        case 'once':     if (await this.send('d !')) this.setArmed(false); break;
-        case 'stop':     if (await this.send('d 0')) { this.dumpMode = null; this.setArmed(false); } break;
+        case 'stream':   this.want = 'd';   this.lastBlockAt = Date.now(); if (await this.send('d')) this.setArmed(false); break;
+        case 'trigger':  this.want = 'd t'; if (await this.send('d t')) this.setArmed(true); break;
+        case 'once':     this.want = null;  if (await this.send('d !')) this.setArmed(false); break;
+        case 'stop':     this.want = null;  if (await this.send('d 0')) { this.dumpMode = null; this.setArmed(false); } break;
         case 'reload':   this.send('t'); break;
         case 'save-nvs': this.send('t save'); break;
         case 'reset':

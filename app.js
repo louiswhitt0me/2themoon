@@ -62,6 +62,7 @@ const CONFIG = {
     1: 'Standing start (bed time is the dip)',
     2: 'Hit sensor limit (peak G is a minimum)',
     4: 'Data gap just before this jump',
+    8: 'Much longer than the jumps before it (probably a missed landing)',
   },
 
   // --- 10 bounce time --------------------------------------------------------
@@ -939,13 +940,32 @@ const BLE = {
     if (this.device.name) handleDeviceName(this.device.name);   // the sensor's N line confirms it
     await this.requestBackfill();
     await this.requestPower();
+    // The sensor forgets its capture mode if it rebooted; put the debug screen's back.
+    if (typeof Debug !== 'undefined') { try { Debug.onConnected(); } catch (e) { console.warn('[debug]', e); } }
+  },
+
+  /** Send one command line. Writes go one at a time (Web Bluetooth refuses
+      overlapping GATT operations), and one that collides with a write from
+      elsewhere (Synchro's pings, HD) is tried again rather than lost. */
+  sendChain: Promise.resolve(),
+  send(line) {
+    const job = this.sendChain.then(async () => {
+      for (let attempt = 1; ; attempt++) {
+        if (!this.rx) throw new Error('not connected');
+        try { await this.rx.writeValue(new TextEncoder().encode(line + '\n')); return; }
+        catch (e) { if (attempt >= 4 || !(this.device && this.device.gatt.connected)) throw e; }
+        await sleep(60 * attempt);
+      }
+    });
+    this.sendChain = job.catch(() => {});
+    return job;
   },
 
   /** The sensor only reports power every 30 s or on a change, so ask now
       rather than showing no battery for the first half-minute. */
   async requestPower() {
     if (!this.rx) return;
-    try { await this.rx.writeValue(new TextEncoder().encode('p\n')); }
+    try { await this.send('p'); }
     catch (e) { console.info('[ble] power request failed', e.message); }
   },
 
@@ -955,7 +975,7 @@ const BLE = {
     if (!this.rx || !last || last.demo) return;
     if (Date.now() - new Date(last.receivedAt).getTime() > CONFIG.backfillWindowMs) return;
     try {
-      await this.rx.writeValue(new TextEncoder().encode(`b ${last.index + 1}\n`));
+      await this.send(`b ${last.index + 1}`);
       console.info('[ble] requested backfill from jump', last.index + 1);
     } catch (e) { console.info('[ble] backfill request failed', e.message); }
   },
@@ -965,7 +985,7 @@ const BLE = {
       replies with an N line, which is what actually updates the app. */
   async setLabel(label) {
     if (!this.rx) throw new Error('this sensor has no command channel');
-    await this.rx.writeValue(new TextEncoder().encode(`n ${label}\n`));
+    await this.send(`n ${label}`);
   },
 
   onValue: (e) => {
@@ -983,6 +1003,9 @@ const BLE = {
     if (this.reconnecting || !this.device) return;
     this.reconnecting = true;
     for (let attempt = 1; attempt <= CONFIG.reconnectAttempts; attempt++) {
+      // Before the banner: a Disconnect tapped mid-attempt fails that attempt,
+      // and showing "Reconnecting…" again would undo it on screen.
+      if (this.userDisconnect) break;
       this.setState('reconnecting', `Sensor disconnected. Reconnecting… (try ${attempt} of ${CONFIG.reconnectAttempts}). Your jumps are saved.`);
       await sleep(Math.min(1000 * 2 ** (attempt - 1), 8000));
       if (this.userDisconnect) break;
@@ -1007,8 +1030,11 @@ const BLE = {
 
   disconnect() {
     this.userDisconnect = true;
-    if (this.device && this.device.gatt.connected) this.device.gatt.disconnect();
-    else { this.setState('idle'); Wake.disable(); }
+    if (this.device && this.device.gatt.connected) { this.device.gatt.disconnect(); return; }
+    // Not connected, but a reconnect attempt may be under way: disconnect()
+    // aborts it, so it can't complete after the user has given up on it.
+    if (this.device) this.device.gatt.disconnect();
+    this.setState('idle'); Wake.disable();
   },
 
   setState(state, message, soft = false) {
