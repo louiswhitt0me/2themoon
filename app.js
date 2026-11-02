@@ -423,6 +423,7 @@ const S = {
   tbView: null,           // { setId, startJumpId } — the 10 bounce run shown on the detail screen
   liveTb: null,           // { setId, startJumpId } — the 10 bounce run picked from the Live chart
   precision: DEFAULT_PRECISION,   // decimals on every time shown, 1-3 (kept in meta)
+  chartStyle: 'bar',      // jump charts: 'bar' (stacked air + bed) or 'line' (air line, total line above) (kept in meta)
   demo: null,
 };
 let idleTimer = null;
@@ -1178,11 +1179,15 @@ async function stopDemo({ restore = true } = {}) {
 
 /* ==========================================================================
    JumpChart — one stacked bar per jump (bed at the bottom, air on top, height = air + bed). SVG, hand-built.
+   Line style (S.chartStyle 'line'): a line through each jump's air time, and a
+   second line above it through the total (air + bed); the band between is bed.
    Scroll mode: fixed bar width, horizontal scroll, fixed y-axis.
    Fit mode (results card): squeezes every jump into the available width.
    ========================================================================== */
+const CHART_STYLES = ['bar', 'line'];
 let chartUid = 0;
 class JumpChart {
+  static all = new Set();   // every chart, so the bar/line toggle redraws them all
   constructor(root, { live = false, fit = false, showDetail = true, showSets = false, emptyText = '', onTenBounce = null } = {}) {
     this.root = root; this.live = live; this.fit = fit; this.showDetail = showDetail && !fit;
     this.showSets = showSets;   // draw a divider and a "SET n" label where one burst ends and the next begins
@@ -1191,10 +1196,15 @@ class JumpChart {
     this.highlight = new Set();       // ids of the jumps in a 10 bounce run, drawn as a band
     this.uid = ++chartUid;
     this.jumps = []; this.pinned = true; this.selected = null; this.newFrom = Infinity;
+    JumpChart.all.add(this);
     root.innerHTML = `
       <div class="chart-top">
-        <div class="legend" aria-hidden="true"><span><i class="sw sw-air"></i>Air</span><span><i class="sw sw-bed"></i>Bed</span></div>
-        <span class="chart-hint">Bar = air + bed${fit ? '' : ' · tap for details'}</span>
+        <div class="legend" aria-hidden="true"></div>
+        <span class="chart-hint"></span>
+        ${fit ? '' : `<div class="seg chart-style-seg" role="group" aria-label="Chart style">
+          <button type="button" class="seg-btn" data-style="bar" aria-pressed="false">Bars</button>
+          <button type="button" class="seg-btn" data-style="line" aria-pressed="false">Line</button>
+        </div>`}
       </div>
       <div class="chart-body">
         <svg class="y-axis" aria-hidden="true"></svg>
@@ -1212,6 +1222,13 @@ class JumpChart {
     this.empty = $('.chart-empty', root);
     this.detail = $('.chart-detail', root);
     this.latestBtn = $('.to-latest', root);
+    this.legend = $('.legend', root);
+    this.hint = $('.chart-hint', root);
+    this.styleSeg = $('.chart-style-seg', root);
+    if (this.styleSeg) this.styleSeg.addEventListener('click', (e) => {
+      const b = e.target.closest('.seg-btn');
+      if (b) setChartStyle(b.dataset.style);
+    });
 
     if (this.fit) this.scroller.style.overflowX = 'hidden';
     this.scroller.addEventListener('scroll', () => {
@@ -1285,7 +1302,9 @@ class JumpChart {
     if (!this.detail) return;
     const j = this.selected != null ? this.jumps[this.selected] : null;
     if (!j) {
-      this.detail.innerHTML = this.jumps.length ? '<span>Tap any bar to see that jump.</span>' : '';
+      const what = S.chartStyle === 'line' ? 'point' : 'bar';
+      this.detail.innerHTML = this.jumps.length
+        ? `<span>Tap any ${what} to see that jump${this.onTenBounce ? ' and its 10 bounce time' : ''}.</span>` : '';
       return;
     }
     const ft = flagText(j.flags);
@@ -1297,10 +1316,27 @@ class JumpChart {
       <span>Peak <b>${j.peakG.toFixed(1)} g</b></span>
       ${j.flags ? `<span class="d-flag" title="${esc(ft)}">Flags ${j.flags}${ft ? ' · ' + esc(ft) : ''}</span>` : ''}
       <span class="d-raw">Sensor #${j.index}</span>
-      ${this.onTenBounce ? '<button type="button" class="btn-small btn-outline d-tb" data-tb>See 10 bounce time</button>' : ''}`;
+      ${this.onTenBounce ? `<button type="button" class="btn-primary d-tb" data-tb>
+        <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="13.5" r="7.5" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M12 13.5V9.5M9.5 3h5M18.5 6.5l1.5-1.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+        <span class="btn-label"><span class="btn-main">See 10 bounce time</span><span class="btn-sub">Starting from jump ${this.selected + 1}</span></span>
+      </button>` : ''}`;
+  }
+
+  /** Legend, hint and toggle for the current chart style. */
+  renderStyle() {
+    const line = S.chartStyle === 'line';
+    this.legend.innerHTML = line
+      ? '<span><i class="sw sw-line sw-total"></i>Total</span><span><i class="sw sw-line sw-air-line"></i>Air</span><span><i class="sw sw-bed sw-band"></i>Bed</span>'
+      : '<span><i class="sw sw-air"></i>Air</span><span><i class="sw sw-bed"></i>Bed</span>';
+    this.hint.textContent = (line ? 'Top line = air + bed' : 'Bar = air + bed') + (this.fit ? '' : ' · tap for details');
+    this.scroller.setAttribute('aria-label', line
+      ? 'One point per jump. The lower blue line is air time, the upper line is the total of air plus bed; the striped band between them is bed time.'
+      : 'One bar per jump. Bar height is the total of air plus bed. Blue top part is air, striped orange bottom part is bed.');
+    if (this.styleSeg) $$('.seg-btn', this.styleSeg).forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.style === S.chartStyle)));
   }
 
   render() {
+    this.renderStyle();
     const n = this.jumps.length;
     const scrollerW = this.scroller.clientWidth;
     if (!scrollerW) return;   // hidden
@@ -1367,6 +1403,24 @@ class JumpChart {
     // room before a value fits above them, or inside a segment.
     const extra = (S.precision - DEFAULT_PRECISION) * 6;
     const smallAt = 34 + extra, insideAt = 30 + extra;
+    const line = S.chartStyle === 'line';
+    if (line) {
+      // One run of lines per set, so a rest between bursts is a break, not a slope.
+      // The band between the air line and the total line is the bed time.
+      const pt = (i, ms) => `${(xs[i] + (this.fit ? 3 : 8) + groupW / 2).toFixed(1)} ${y(ms / 1000).toFixed(1)}`;
+      const runs = showSets ? starts.map((s, k) => [s, (k + 1 < starts.length ? starts[k + 1] : n) - 1]) : (n ? [[0, n - 1]] : []);
+      for (const [a, b] of runs) {
+        let air = '', total = '', back = '';
+        for (let i = a; i <= b; i++) {
+          const j = this.jumps[i];
+          air += `${i === a ? 'M' : 'L'}${pt(i, j.flightMs)} `;
+          total += `${i === a ? 'M' : 'L'}${pt(i, j.flightMs + j.contactMs)} `;
+        }
+        for (let i = b; i >= a; i--) back += `L${pt(i, this.jumps[i].flightMs)} `;
+        if (b > a) out += `<path class="line-band" d="${total}${back}z"/><path class="line-band-hatch" d="${total}${back}z" fill="url(#${hatch})"/>`;
+        out += `<path class="line-total" d="${total}"/><path class="line-air" d="${air}"/>`;
+      }
+    }
     for (let i = 0; i < n; i++) {
       const j = this.jumps[i];
       const gx = xs[i] + (this.fit ? 3 : 8);
@@ -1383,9 +1437,17 @@ class JumpChart {
       const w = barW.toFixed(1);
       // air segment: rounded top corners only
       const airPath = `M${x0.toFixed(1)} ${yBed.toFixed(1)} V${(yTop + rx).toFixed(1)} q0 ${-rx} ${rx} ${-rx} h${(barW - 2 * rx).toFixed(1)} q${rx} 0 ${rx} ${rx} V${yBed.toFixed(1)} z`;
+      const yAir = y(j.flightMs / 1000);
+      const r = Math.max(2.5, Math.min(5.5, groupW / 7));
       out += `<g class="jump${isNew ? ' new' : ''}${this.selected === i ? ' sel' : ''}${this.highlight.has(j.id) ? ' tb' : ''}" data-i="${i}"${this.fit ? '' : ' tabindex="0" role="button"'}
           aria-label="Jump ${i + 1}: total ${secs(totalMs)} seconds, air ${secs(j.flightMs)}, bed ${secs(j.contactMs)}${j.flags ? ', flagged' : ''}">
         <rect class="hit" x="${gx}" y="${top - 24}" width="${groupW}" height="${plotH + 24 + bottom}" rx="8"/>
+        ${line ? `<g class="dots">
+          <circle class="dot-total" cx="${cx}" cy="${yTop.toFixed(1)}" r="${r.toFixed(1)}"/>
+          <circle class="dot-air" cx="${cx}" cy="${yAir.toFixed(1)}" r="${r.toFixed(1)}"/>
+        </g>
+        ${labels ? `<text class="val val-total${groupW < smallAt ? ' val-sm' : ''}" x="${cx}" y="${(yTop - r - 5).toFixed(1)}">${secs(totalMs)}</text>
+        ${groupW >= insideAt && base - yAir >= 30 ? `<text class="val val-air-line${groupW < smallAt ? ' val-sm' : ''}" x="${cx}" y="${(yAir + r + 16).toFixed(1)}">${secs(j.flightMs)}</text>` : ''}` : ''}` : `
         <g class="bar">
           <path class="bar-air" d="${airPath}"/>
           <rect class="bar-bed" x="${x0.toFixed(1)}" y="${yBed.toFixed(1)}" width="${w}" height="${bedH.toFixed(1)}"/>
@@ -1394,7 +1456,7 @@ class JumpChart {
         </g>
         ${labels ? `<text class="val val-total${groupW < smallAt ? ' val-sm' : ''}" x="${cx}" y="${(yTop - 6).toFixed(1)}">${secs(totalMs)}</text>
         ${barW >= insideAt && airH >= 22 ? `<text class="val val-in-air" x="${cx}" y="${(yBed - 7).toFixed(1)}">${secs(j.flightMs)}</text>` : ''}
-        ${barW >= insideAt && bedH >= 20 ? `<text class="val val-in-bed" x="${cx}" y="${(base - 6).toFixed(1)}">${secs(j.contactMs)}</text>` : ''}` : ''}
+        ${barW >= insideAt && bedH >= 20 ? `<text class="val val-in-bed" x="${cx}" y="${(base - 6).toFixed(1)}">${secs(j.contactMs)}</text>` : ''}` : ''}`}
         ${i % labelEvery === 0 || i === n - 1 ? `<text class="xlab" x="${(gx + groupW / 2).toFixed(1)}" y="${(base + 20).toFixed(1)}">${i + 1}</text>` : ''}
         ${j.flags ? `<path class="flag-mark" d="M${(gx + groupW / 2).toFixed(1)} ${(top - 16).toFixed(1)} l4 7 h-8 z"><title>Flags ${j.flags}${ft ? ': ' + esc(ft) : ''}</title></path>` : ''}
       </g>`;
@@ -1495,6 +1557,19 @@ async function setPrecision(dp) {
   renderAfterData();
   if (typeof Sync !== 'undefined' && Sync.ready) Sync.render();   // air and bed times there too
   try { await DB.setMeta('precision', dp); } catch (e) { console.info('[app] could not save precision', e); }
+}
+
+/* ---------- Chart style (bars or lines) ----------
+   Global like the precision: every jump chart has the toggle, and switching one
+   switches them all. */
+async function setChartStyle(style) {
+  if (!CHART_STYLES.includes(style) || style === S.chartStyle) return;
+  S.chartStyle = style;
+  for (const c of JumpChart.all) {
+    if (!c.root.isConnected) { JumpChart.all.delete(c); continue; }
+    c.render(); c.renderDetail();
+  }
+  try { await DB.setMeta('chartStyle', style); } catch (e) { console.info('[app] could not save chart style', e); }
 }
 
 function renderLive({ newJump = false } = {}) {
@@ -2478,6 +2553,9 @@ async function boot() {
   const savedDp = await DB.meta('precision');
   if (PRECISIONS.includes(savedDp)) S.precision = savedDp;
   renderPrecision();
+  const savedStyle = await DB.meta('chartStyle');
+  if (CHART_STYLES.includes(savedStyle)) S.chartStyle = savedStyle;
+  for (const c of JumpChart.all) c.render();
   S.deviceName = (await DB.meta('lastDeviceName')) || null;
   renderDeviceName();
   await loadCurrentSession(await DB.meta('currentSessionId'));

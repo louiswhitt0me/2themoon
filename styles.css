@@ -310,7 +310,7 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
   padding: 10px 10px 8px; display: flex; flex-direction: column; min-height: 260px;
   backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
 }
-#view-live .chart-card { flex: 1; }
+#view-live .chart-card { flex: 1 0 auto; }   /* grow to fill, never squeeze the detail row into what follows */
 .chart-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 4px 6px; flex-wrap: wrap; }
 .legend { display: flex; gap: 16px; font: 800 18px/1 var(--display); letter-spacing: .06em; text-transform: uppercase; }
 .legend span { display: inline-flex; align-items: center; gap: 7px; }
@@ -318,6 +318,13 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
 .sw-air { background: var(--air); box-shadow: 0 0 8px rgba(92,184,255,.6); }
 .sw-bed { background: repeating-linear-gradient(135deg, var(--bed) 0 4px, var(--bed-stripe) 4px 7px); }
 .chart-hint { font-size: 13px; color: var(--text-2); }
+/* Bars / Line toggle on every chart. Global, like the precision toggle. */
+.chart-style-seg { margin-left: auto; }
+.chart-style-seg .seg-btn { min-height: 30px; padding: 0 11px; font-size: 14px; }
+.sw-line { height: 4px; width: 20px; border-radius: 2px; }
+.sw-total { background: var(--text); }
+.sw-air-line { background: var(--air); box-shadow: 0 0 8px rgba(92,184,255,.6); }
+.sw-band { opacity: .6; }
 .chart-body { position: relative; flex: 1; display: flex; min-height: 200px; }
 .y-axis { flex: none; width: 46px; overflow: visible; }
 .scroller {
@@ -358,6 +365,18 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
 .bar-air { fill: var(--air); }
 .bar-bed { fill: var(--bed); }
 .bar { filter: drop-shadow(0 0 6px rgba(92,184,255,.28)); }
+/* Line style: air line, total line above it, bed as the striped band between. */
+.line-air, .line-total { fill: none; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; pointer-events: none; }
+.line-air { stroke: var(--air); filter: drop-shadow(0 0 6px rgba(92,184,255,.45)); }
+.line-total { stroke: var(--text); }
+.line-band { fill: var(--bed); opacity: .32; pointer-events: none; }
+.line-band-hatch { opacity: .35; pointer-events: none; }
+.dot-air { fill: var(--air); stroke: var(--card-solid); stroke-width: 2; }
+.dot-total { fill: var(--text); stroke: var(--card-solid); stroke-width: 2; }
+.val-air-line { fill: var(--air-ink); font-size: 13px; }
+.val-air-line.val-sm { font-size: 11px; }
+.jump.sel .dots circle { stroke: var(--moon); stroke-width: 2.5; }
+.jump.new .dots { animation: pop .3s ease-out both; }
 .flag-mark { fill: var(--moon); }
 .jump { cursor: pointer; outline: none; }
 .jump .hit { fill: transparent; }
@@ -661,7 +680,16 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y
 .jump.tb .hit { fill: rgba(61,220,151,.13); }
 .jump.tb .xlab { fill: var(--good); font-weight: 800; }
 .jump.tb.sel .hit { fill: rgba(255,225,122,.2); }
-.chart-detail .d-tb { margin-left: auto; }
+/* "See 10 bounce time" from the tapped jump: a full-width moonlight button on
+   its own row, so it reads as the next thing to do rather than fine print. */
+/* Green like the run's band and panel, so it doesn't read as the live "10 bounce time" button. */
+.chart-detail .d-tb { flex: 1 0 100%; margin-top: 4px; justify-content: flex-start; padding: 8px 18px; min-height: 54px; text-align: left;
+  background: var(--good); color: var(--on-light); box-shadow: 0 4px 0 #1E8F5E, 0 0 20px rgba(61,220,151,.35); }
+.chart-detail .d-tb:active { box-shadow: 0 2px 0 #1E8F5E, 0 0 14px rgba(61,220,151,.3); }
+.chart-detail .d-tb svg { width: 26px; height: 26px; flex: none; }
+.chart-detail .d-tb .btn-label { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.chart-detail .d-tb .btn-main { font-size: 19px; }
+.chart-detail .d-tb .btn-sub { font: 700 13px/1 var(--display); letter-spacing: .08em; opacity: .7; }
 
 /* The panel under a turn or set's chart. */
 .tb-panel {
